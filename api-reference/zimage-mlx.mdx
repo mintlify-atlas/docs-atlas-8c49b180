@@ -1,0 +1,358 @@
+---
+title: zimage-mlx
+description: Z-Image-Turbo image generation API for Apple Silicon using MLX
+---
+
+## Overview
+
+Z-Image-Turbo is a 6B parameter Single-Stream DiT (S3-DiT) optimized for fast image generation with 9-step turbo inference.
+
+### Key features
+
+- **Z-Image-Turbo transformer**: 6B parameter model with Noise Refiner, Context Refiner, and 30 Joint blocks
+- **Qwen3-4B text encoder**: Extracts layer 34 (2560-dim embeddings)
+- **3-axis RoPE**: Position encoding with dimensions [32, 48, 48] and theta=256
+- **9-step turbo inference**: Distilled for fast generation
+- **4-bit quantization**: Memory-efficient inference (~3GB vs ~12GB)
+
+## Architecture differences from FLUX
+
+- Uses Noise Refiner + Context Refiner + Joint blocks (vs Double + Single)
+- 3-axis RoPE [32, 48, 48] with theta=256 (vs 4-axis)
+- Per-block AdaLN with tanh gates
+- Qwen3-4B layer 34 extraction (vs concat layers 8, 17, 26)
+
+## Core types
+
+### ZImageTransformer
+
+The main transformer model for Z-Image-Turbo.
+
+```rust
+pub struct ZImageTransformer {
+    pub config: ZImageConfig,
+    // ... internal layers
+}
+```
+
+<ParamField path="config" type="ZImageConfig">
+  Model configuration parameters
+</ParamField>
+
+#### Methods
+
+<ResponseField name="new" type="fn(config: ZImageConfig) -> Result<Self, Exception>">
+  Create a new Z-Image transformer.
+  
+  <ParamField path="config" type="ZImageConfig">
+    Model configuration. Use `ZImageConfig::default()` for standard 6B model.
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="forward" type="fn(&mut self, x: &Array, t: &Array, cap_feats: &Array, x_pos: &Array, cap_pos: &Array, x_mask: Option<&Array>, cap_mask: Option<&Array>) -> Result<Array, Exception>">
+  Run forward pass through the transformer.
+  
+  <ParamField path="x" type="&Array">
+    Image latents `[batch, img_seq, in_channels * patch^2]` where `in_channels=16`
+  </ParamField>
+  
+  <ParamField path="t" type="&Array">
+    Timesteps `[batch]` scaled by `t_scale=1000.0`
+  </ParamField>
+  
+  <ParamField path="cap_feats" type="&Array">
+    Caption features from Qwen3 layer 34 `[batch, cap_seq, 2560]`
+  </ParamField>
+  
+  <ParamField path="x_pos" type="&Array">
+    Image position coordinates `[batch, img_seq, 3]` for (h, w, t)
+  </ParamField>
+  
+  <ParamField path="cap_pos" type="&Array">
+    Caption position coordinates `[batch, cap_seq, 3]`
+  </ParamField>
+  
+  <ParamField path="x_mask" type="Option<&Array>">
+    Optional image mask for padding
+  </ParamField>
+  
+  <ParamField path="cap_mask" type="Option<&Array>">
+    Optional caption mask for padding
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Predicted velocity `[batch, img_seq, in_channels * patch^2]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="forward_with_rope" type="fn(&mut self, x: &Array, t: &Array, cap_feats: &Array, x_pos: &Array, cap_pos: &Array, cos: &Array, sin: &Array, x_mask: Option<&Array>, cap_mask: Option<&Array>) -> Result<Array, Exception>">
+  Forward pass with pre-computed RoPE frequencies (faster for denoising loops).
+  
+  <ParamField path="cos" type="&Array">
+    Pre-computed cosine frequencies from `compute_rope()`
+  </ParamField>
+  
+  <ParamField path="sin" type="&Array">
+    Pre-computed sine frequencies from `compute_rope()`
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="compute_rope" type="fn(&self, x_pos: &Array, cap_pos: &Array) -> Result<(Array, Array), Exception>">
+  Pre-compute 3-axis RoPE frequencies for caching.
+  
+  <ParamField path="x_pos" type="&Array">
+    Image position coordinates `[batch, img_seq, 3]`
+  </ParamField>
+  
+  <ParamField path="cap_pos" type="&Array">
+    Caption position coordinates `[batch, cap_seq, 3]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="(Array, Array)">
+    Tuple of `(cos, sin)` frequencies for efficient reuse
+  </ResponseField>
+</ResponseField>
+
+### ZImageConfig
+
+Configuration for Z-Image-Turbo.
+
+```rust
+pub struct ZImageConfig {
+    pub dim: i32,              // 3840
+    pub n_heads: i32,          // 30
+    pub n_kv_heads: i32,       // 30
+    pub n_layers: i32,         // 30 joint blocks
+    pub n_refiner_layers: i32, // 2 refiner blocks each
+    pub in_channels: i32,      // 16
+    pub cap_feat_dim: i32,     // 2560 (Qwen3 layer 34)
+    pub axes_dims: [i32; 3],   // [32, 48, 48]
+    pub rope_theta: f32,       // 256.0
+    pub t_scale: f32,          // 1000.0
+    pub norm_eps: f32,         // 1e-5
+    pub patch_size: i32,       // 2
+}
+```
+
+<ParamField path="dim" type="i32" default="3840">
+  Model dimension (hidden size)
+</ParamField>
+
+<ParamField path="n_heads" type="i32" default="30">
+  Number of attention heads
+</ParamField>
+
+<ParamField path="n_layers" type="i32" default="30">
+  Number of joint transformer blocks
+</ParamField>
+
+<ParamField path="n_refiner_layers" type="i32" default="2">
+  Number of noise refiner and context refiner blocks (2 each)
+</ParamField>
+
+<ParamField path="cap_feat_dim" type="i32" default="2560">
+  Caption feature dimension from Qwen3 layer 34
+</ParamField>
+
+<ParamField path="axes_dims" type="[i32; 3]" default="[32, 48, 48]">
+  3-axis RoPE dimensions for (h, w, t) axes
+</ParamField>
+
+<ParamField path="rope_theta" type="f32" default="256.0">
+  RoPE base frequency (different from FLUX's 2000.0)
+</ParamField>
+
+<ParamField path="t_scale" type="f32" default="1000.0">
+  Timestep scaling factor
+</ParamField>
+
+### ZImageTransformerBlock
+
+Single transformer block with optional AdaLN modulation.
+
+```rust
+pub struct ZImageTransformerBlock {
+    pub dim: i32,
+    pub has_modulation: bool,
+    // ... internal layers
+}
+```
+
+<ParamField path="has_modulation" type="bool">
+  Whether block uses AdaLN modulation (true for noise refiner and joint blocks, false for context refiner)
+</ParamField>
+
+<ResponseField name="new" type="fn(config: &ZImageConfig, has_modulation: bool) -> Result<Self, Exception>">
+  Create a new transformer block.
+  
+  <ParamField path="config" type="&ZImageConfig">
+    Model configuration
+  </ParamField>
+  
+  <ParamField path="has_modulation" type="bool">
+    Enable AdaLN modulation with tanh gates
+  </ParamField>
+</ResponseField>
+
+## 3-axis RoPE utilities
+
+<ResponseField name="create_coordinate_grid" type="fn(size: (i32, i32, i32), start: (i32, i32, i32)) -> Result<Array, Exception>">
+  Create 3D coordinate grid for position encoding.
+  
+  <ParamField path="size" type="(i32, i32, i32)">
+    Grid dimensions (d0, d1, d2)
+  </ParamField>
+  
+  <ParamField path="start" type="(i32, i32, i32)">
+    Starting coordinates (s0, s1, s2)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Coordinate array `[d0*d1*d2, 3]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="compute_rope_3axis" type="fn(positions: &Array, axes_dims: &[i32; 3], theta: f32) -> Result<(Array, Array), Exception>">
+  Compute 3-axis RoPE frequencies.
+  
+  <ParamField path="positions" type="&Array">
+    Position coordinates `[batch, seq, 3]` for (h, w, t)
+  </ParamField>
+  
+  <ParamField path="axes_dims" type="&[i32; 3]">
+    Dimensions per axis, e.g., [32, 48, 48]
+  </ParamField>
+  
+  <ParamField path="theta" type="f32">
+    Base frequency (256.0 for Z-Image)
+  </ParamField>
+  
+  <ResponseField name="returns" type="(Array, Array)">
+    Tuple of `(cos, sin)` each shape `[batch, seq, 1, half_total_dim]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="apply_rope_3axis" type="fn(x: &Array, cos: &Array, sin: &Array) -> Result<Array, Exception>">
+  Apply rotary embedding using even/odd split.
+  
+  <ParamField path="x" type="&Array">
+    Input tensor `[batch, seq, heads, head_dim]`
+  </ParamField>
+  
+  <ParamField path="cos" type="&Array">
+    Cosine frequencies `[batch, seq, 1, head_dim/2]`
+  </ParamField>
+  
+  <ParamField path="sin" type="&Array">
+    Sine frequencies `[batch, seq, 1, head_dim/2]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Rotated tensor same shape as input
+  </ResponseField>
+</ResponseField>
+
+## Quantization
+
+### ZImageTransformerQuantized
+
+4-bit quantized Z-Image transformer for reduced memory.
+
+<ResponseField name="load_quantized_zimage_transformer" type="fn(weights: HashMap<String, Array>, config: ZImageConfig) -> Result<ZImageTransformerQuantized, Exception>">
+  Load 4-bit quantized model from pre-quantized weights.
+  
+  <ParamField path="weights" type="HashMap<String, Array>">
+    Pre-quantized model weights
+  </ParamField>
+  
+  <ParamField path="config" type="ZImageConfig">
+    Model configuration
+  </ParamField>
+  
+  <ResponseField name="returns" type="ZImageTransformerQuantized">
+    4-bit quantized model (~3GB memory vs ~12GB full precision)
+  </ResponseField>
+</ResponseField>
+
+### QuantizedQwen3TextEncoder
+
+4-bit quantized Qwen3 text encoder.
+
+<ResponseField name="load_quantized_qwen3_encoder" type="fn(weights: HashMap<String, Array>, config: Qwen3Config) -> Result<QuantizedQwen3TextEncoder, Exception>">
+  Load 4-bit quantized Qwen3 encoder.
+  
+  <ParamField path="weights" type="HashMap<String, Array>">
+    Pre-quantized weights
+  </ParamField>
+  
+  <ParamField path="config" type="Qwen3Config">
+    Qwen3 configuration
+  </ParamField>
+</ResponseField>
+
+## Weight utilities
+
+<ResponseField name="sanitize_mlx_weights" type="fn(weights: HashMap<String, Array>) -> HashMap<String, Array>">
+  Sanitize Z-Image weights from MLX format to Rust format.
+  
+  <ParamField path="weights" type="HashMap<String, Array>">
+    Raw weights from MLX format
+  </ParamField>
+  
+  <ResponseField name="returns" type="HashMap<String, Array>">
+    Sanitized weights ready to load
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="sanitize_zimage_weights" type="fn(weights: HashMap<String, Array>) -> HashMap<String, Array>">
+  Sanitize Z-Image weights from PyTorch diffusers format.
+</ResponseField>
+
+## Re-exported from flux-klein-mlx
+
+Z-Image shares several components with FLUX.2-klein:
+
+- `Qwen3Config`, `Qwen3TextEncoder`, `sanitize_qwen3_weights`
+- `Decoder`, `AutoEncoderConfig`
+- `load_safetensors`, `sanitize_vae_weights`
+- `FluxSampler`, `FluxSamplerConfig`
+
+## Performance comparison
+
+| Mode | Memory | Speed |
+|------|--------|-------|
+| Dequantized (f32) | ~12GB | ~1.87s/step |
+| Quantized (4-bit) | ~3GB | ~2.08s/step |
+
+## Example usage
+
+```rust
+use zimage_mlx::{ZImageTransformer, ZImageConfig, create_coordinate_grid};
+use flux_klein_mlx::{Qwen3TextEncoder, Decoder, FluxSampler};
+
+// Load models
+let text_encoder = Qwen3TextEncoder::new(Qwen3Config::default())?;
+let transformer = ZImageTransformer::new(ZImageConfig::default())?;
+let vae = Decoder::new(AutoEncoderConfig::default())?;
+
+// Or use quantized for lower memory
+let transformer = load_quantized_zimage_transformer(weights, config)?;
+
+// Create position grids
+let x_pos = create_coordinate_grid((32, 32, 1), (0, 0, 0))?;
+let cap_pos = create_coordinate_grid((77, 1, 1), (0, 0, 0))?;
+
+// Pre-compute RoPE
+let (rope_cos, rope_sin) = transformer.compute_rope(&x_pos, &cap_pos)?;
+
+// Generate image
+for t in sampler.timesteps(None)? {
+    let t_arr = Array::from_slice(&[t], &[1]);
+    let v_pred = transformer.forward_with_rope(
+        &latents, &t_arr, &cap_feats, 
+        &x_pos, &cap_pos, &rope_cos, &rope_sin,
+        None, None
+    )?;
+    latents = sampler.step(&latents, &v_pred, t, t_next)?;
+}
+```

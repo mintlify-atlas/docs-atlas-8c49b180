@@ -1,0 +1,374 @@
+---
+title: Mixtral models
+description: Mixture of Experts LLM with custom Metal kernels
+---
+
+Mixtral is a Mixture of Experts (MoE) architecture featuring 8 expert networks with top-2 routing. The MLX implementation includes custom fused Metal kernels for 10-12x faster expert computation.
+
+## Features
+
+- **8 Expert MoE**: 8 experts with top-2 routing per token (47B total params, 13B active)
+- **Fused SwiGLU kernel**: Custom Metal kernel for 10-12x faster expert MLP
+- **Optimized routing**: `gather_qmm` for efficient expert dispatch
+- **4-bit quantization**: Required for consumer hardware (26 GB for 8x7B)
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+mixtral-mlx = { path = "../mixtral-mlx" }
+mlx-rs = "0.18"
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download model">
+    Download 4-bit quantized model (required for consumer hardware):
+
+    ```bash
+    # Mixtral-8x7B 4-bit (fits in 32GB)
+    huggingface-cli download mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit \
+        --local-dir ./models/Mixtral-8x7B-4bit
+    ```
+
+    For larger memory systems:
+
+    ```bash
+    # Mixtral-8x22B 4-bit (requires 64GB+ memory)
+    huggingface-cli download mlx-community/Mixtral-8x22B-Instruct-v0.1-4bit \
+        --local-dir ./models/Mixtral-8x22B-4bit
+    ```
+  </Step>
+
+  <Step title="Run generation">
+    ```bash
+    cargo run --release --example generate_mixtral -- \
+        ./models/Mixtral-8x7B-4bit "Tell me about"
+    ```
+  </Step>
+
+  <Step title="Use in your code">
+    ```rust
+    use mixtral_mlx::{load_model, load_tokenizer, Generate, KVCache};
+    use mlx_rs::ops::indexing::NewAxis;
+
+    let tokenizer = load_tokenizer("./models/Mixtral-8x7B-4bit")?;
+    let mut model = load_model("./models/Mixtral-8x7B-4bit")?;
+
+    let encoding = tokenizer.encode("Hello, I am", true)?;
+    let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+    for token in generator.take(100) {
+        let token = token?;
+        print!("{}", tokenizer.decode(&[token.item::<u32>()], true)?);
+    }
+    ```
+  </Step>
+</Steps>
+
+## MoE architecture
+
+Mixtral uses sparse Mixture of Experts to achieve high capacity with manageable computation:
+
+### Expert routing
+
+Each token is routed to the top-k (k=2) experts based on learned gate logits:
+
+```
+Input token x
+  ↓
+gate_linear(x) → [8 gate logits]
+  ↓
+softmax + top-k selection → select 2 experts
+  ↓
+Dispatch to expert_0 and expert_4 (example)
+  ↓
+Weighted combination of expert outputs
+```
+
+Only 2 of 8 experts are active per token, reducing computation from 47B to ~13B parameters.
+
+### SwiGLU activation
+
+Experts use SwiGLU activation with a custom fused Metal kernel:
+
+```rust
+// Traditional approach (slow)
+let gate = gate_proj.forward(&x)?;
+let up = up_proj.forward(&x)?;
+let activated = silu(&gate)? * &up;  // Two separate ops
+
+// Fused SwiGLU (10-12x faster)
+let activated = fused_swiglu(&up, &gate)?;  // Single Metal kernel
+```
+
+The fused kernel combines:
+- SiLU activation: `silu(gate)`
+- Elementwise multiply: `silu(gate) * up`
+
+Into a single GPU operation, eliminating intermediate buffers.
+
+### Quantized expert dispatch
+
+Uses `gather_qmm` (gather + quantized matrix multiply) for efficient batched computation:
+
+1. **Sort tokens by expert**: Tokens routed to same expert grouped together
+2. **Coalesced memory access**: Single kernel call per expert
+3. **Quantized weights**: 4-bit weights unpacked on-the-fly during computation
+
+This reduces memory bandwidth and improves GPU utilization.
+
+## Code example
+
+From [examples/generate_mixtral.rs](https://github.com/moxin-org/OminiX-MLX/blob/main/mixtral-mlx/examples/generate_mixtral.rs):
+
+```rust
+use mixtral_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+use mlx_rs::transforms::eval;
+use std::time::Instant;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model_dir = "./models/Mixtral-8x7B-4bit";
+    let prompt = "Hello, I am a";
+
+    println!("Loading Mixtral MoE model from: {}", model_dir);
+    let start = Instant::now();
+
+    let tokenizer = load_tokenizer(model_dir)?;
+    let mut model = load_model(model_dir)?;
+
+    println!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
+
+    // Tokenize
+    let encoding = tokenizer.encode(prompt, true)?;
+    let prompt_tokens = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    println!("Prompt ({} tokens): {}", encoding.get_ids().len(), prompt);
+    println!("---");
+
+    // Generate
+    let mut cache = Vec::new();
+    let generate_start = Instant::now();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt_tokens);
+
+    let mut tokens = Vec::new();
+    for (i, token) in generator.enumerate() {
+        let token = token?;
+        tokens.push(token.clone());
+
+        // Decode every 10 tokens
+        if tokens.len() % 10 == 0 {
+            eval(&tokens)?;
+            let slice: Vec<u32> = tokens.drain(..).map(|t| t.item::<u32>()).collect();
+            print!("{}", tokenizer.decode(&slice, true)?);
+        }
+
+        if i >= 100 { break; }
+    }
+
+    // Flush remaining tokens
+    if !tokens.is_empty() {
+        eval(&tokens)?;
+        let slice: Vec<u32> = tokens.drain(..).map(|t| t.item::<u32>()).collect();
+        print!("{}", tokenizer.decode(&slice, true)?);
+    }
+    println!();
+
+    let gen_time = generate_start.elapsed().as_secs_f32();
+    println!("---");
+    println!("Generated 100 tokens in {:.2}s ({:.1} tok/s)", 
+             gen_time, 100.0 / gen_time);
+
+    Ok(())
+}
+```
+
+## Supported models
+
+<CardGroup cols={2}>
+  <Card title="Mixtral-8x7B-4bit" icon="layer-group">
+    **Total params**: 47B (13B active per token)  
+    **Size**: 26 GB  
+    **Memory required**: 32GB+ unified memory  
+    **Use case**: High-quality general-purpose chat
+
+    ```bash
+    huggingface-cli download \
+      mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit \
+      --local-dir ./models/Mixtral-8x7B-4bit
+    ```
+  </Card>
+
+  <Card title="Mixtral-8x22B-4bit" icon="server">
+    **Total params**: 141B (39B active per token)  
+    **Size**: 70 GB  
+    **Memory required**: 96GB+ unified memory  
+    **Use case**: Maximum quality (M3 Max 128GB only)
+
+    ```bash
+    huggingface-cli download \
+      mlx-community/Mixtral-8x22B-Instruct-v0.1-4bit \
+      --local-dir ./models/Mixtral-8x22B-4bit
+    ```
+  </Card>
+</CardGroup>
+
+<Warning>
+  **4-bit quantization required**
+  
+  Mixtral models are too large to run in full precision on consumer hardware. Always use the 4-bit quantized variants.
+</Warning>
+
+## Performance
+
+### Benchmark results (Apple M3 Max, 40-core GPU)
+
+| Model | Prompt Speed | Decode Speed | Memory |
+|-------|--------------|--------------|--------|
+| Mixtral-8x7B (4-bit) | 80 tok/s | 25 tok/s | 26 GB |
+
+Prompt speed is higher because batch processing is more efficient with MoE parallelization.
+
+### Fused kernel speedup
+
+Custom Metal kernels provide significant speedup:
+
+| Operation | Unfused | Fused | Speedup |
+|-----------|---------|-------|----------|
+| SwiGLU (expert MLP) | ~2.1 ms | ~0.19 ms | **11x** |
+
+This 11x improvement applies to every expert computation, dramatically reducing overall inference time.
+
+## Converting models
+
+Convert from HuggingFace with required 4-bit quantization:
+
+```bash
+pip install mlx-lm
+mlx_lm.convert --hf-path mistralai/Mixtral-8x7B-Instruct-v0.1 -q
+```
+
+<Warning>
+  Do not omit the `-q` flag. Unquantized Mixtral-8x7B requires 94GB memory and is impractical for consumer hardware.
+</Warning>
+
+## Model configuration
+
+Mixtral-8x7B configuration:
+
+```json
+{
+  "hidden_size": 4096,
+  "num_hidden_layers": 32,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 14336,
+  "num_local_experts": 8,
+  "num_experts_per_tok": 2,
+  "vocab_size": 32000,
+  "rope_theta": 1000000.0
+}
+```
+
+Key parameters:
+- **8 experts, 2 active**: Sparse activation reduces computation
+- **Large intermediate size**: 14336 dims per expert (3.5× hidden size)
+- **Grouped Query Attention**: 32 query heads, 8 KV heads (4:1 ratio)
+
+## Memory requirements
+
+### Mixtral-8x7B (4-bit)
+
+| Component | Size |
+|-----------|------|
+| Model weights | 26 GB |
+| KV cache (2K context) | ~2 GB |
+| Activation memory | ~2 GB |
+| **Total** | **~30 GB** |
+
+Recommended: 32GB+ unified memory (M1/M2/M3 Max or higher)
+
+### Mixtral-8x22B (4-bit)
+
+| Component | Size |
+|-----------|------|
+| Model weights | 70 GB |
+| KV cache (2K context) | ~4 GB |
+| Activation memory | ~4 GB |
+| **Total** | **~78 GB** |
+
+Recommended: 96GB+ unified memory (M3 Max 128GB configuration)
+
+## Expert routing analysis
+
+Mixtral learns to specialize experts for different types of content:
+
+- **Expert 0**: Often handles code and technical content
+- **Expert 1**: Frequently processes narrative text
+- **Expert 2-7**: Specialized for various linguistic patterns
+
+Routing is dynamic and learned during training. You can inspect which experts are active for your prompts by examining gate logits.
+
+## API reference
+
+### Loading functions
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model, Error>
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer, Error>
+```
+
+### Generation
+
+```rust
+pub struct Generate<C: KeyValueCache> {
+    // fields omitted
+}
+
+impl<C: KeyValueCache> Generate<C> {
+    pub fn new(
+        model: &mut Model,
+        cache: &mut Vec<C>,
+        temperature: f32,
+        prompt: &Array,
+    ) -> Self
+}
+```
+
+## Troubleshooting
+
+### Out of memory errors
+
+Mixtral-8x7B requires 32GB+ memory. Solutions:
+1. Close all other applications
+2. Reduce max token generation length
+3. Use smaller model (Qwen3-8B, Mistral-7B)
+4. Upgrade to Mac with more memory
+
+### Slow generation on M1/M2 base
+
+Mixtral requires high memory bandwidth. M1/M2 base models (8-core GPU) will see slower performance than M1/M2/M3 Max/Ultra.
+
+Expected speeds on M1 8-core: ~15 tok/s decode (vs 25 tok/s on M3 Max)
+
+### Model download fails
+
+```bash
+# Authenticate with HuggingFace
+huggingface-cli login
+
+# Or set token for private models
+export HF_TOKEN=your_token_here
+```
+
+## Related models
+
+- [Mistral-7B](/llm/mistral) - Dense 7B model without MoE overhead
+- [Qwen3-14B](/llm/qwen3) - Alternative large dense model

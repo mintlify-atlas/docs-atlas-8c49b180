@@ -1,0 +1,303 @@
+---
+title: Qwen3 models
+description: Fast LLM inference with Qwen3 on Apple Silicon
+---
+
+Qwen3 is a family of language models from Alibaba Cloud, ranging from 0.6B to 32B parameters. The MLX implementation provides fast inference with Metal GPU acceleration and support for both dense and quantized models.
+
+## Features
+
+- **Fast inference**: Metal GPU acceleration with async token pipelining
+- **Quantization support**: 4-bit and bf16 models for flexible memory/quality tradeoffs
+- **Step-based KV cache**: Memory-efficient autoregressive generation
+- **Chat templates**: Native support for multi-turn conversations
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+qwen3-mlx = { path = "../qwen3-mlx" }
+mlx-rs = "0.18"
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download a model">
+    Download pre-converted MLX models from HuggingFace:
+
+    ```bash
+    # Qwen3-4B (recommended for testing)
+    huggingface-cli download mlx-community/Qwen3-4B-bf16 --local-dir ./models/Qwen3-4B
+
+    # Qwen3-4B 4-bit quantized (smaller, faster)
+    huggingface-cli download mlx-community/Qwen3-4B-4bit --local-dir ./models/Qwen3-4B-4bit
+    ```
+  </Step>
+
+  <Step title="Load model and tokenizer">
+    ```rust
+    use qwen3_mlx::{load_model, load_tokenizer};
+
+    let model_dir = "./models/Qwen3-4B";
+    let tokenizer = load_tokenizer(model_dir)?;
+    let mut model = load_model(model_dir)?;
+    ```
+  </Step>
+
+  <Step title="Generate text">
+    ```rust
+    use qwen3_mlx::{Generate, KVCache};
+    use mlx_rs::ops::indexing::NewAxis;
+
+    // Tokenize prompt
+    let encoding = tokenizer.encode("Hello, I am", true)?;
+    let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    // Generate tokens
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+    for token in generator.take(100) {
+        let token = token?;
+        let text = tokenizer.decode(&[token.item::<u32>()], true)?;
+        print!("{}", text);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Examples
+
+### Text generation
+
+Generate text from a prompt:
+
+```bash
+cargo run --release --example generate_qwen3 -- ./Qwen3-4B-bf16 "Hello, how are you?"
+```
+
+From [examples/generate_qwen3.rs](https://github.com/moxin-org/OminiX-MLX/blob/main/qwen3-mlx/examples/generate_qwen3.rs):
+
+```rust
+use qwen3_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+use mlx_rs::transforms::eval;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let tokenizer = load_tokenizer("./Qwen3-4B-bf16")?;
+    let mut model = load_model("./Qwen3-4B-bf16")?;
+
+    // Tokenize prompt
+    let encoding = tokenizer.encode("Hello, I am a language model,", true)?;
+    let prompt_tokens = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    // Generate
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt_tokens);
+
+    let mut tokens = Vec::new();
+    for (i, token) in generator.enumerate() {
+        let token = token?;
+        tokens.push(token.clone());
+
+        // Decode in batches for efficiency
+        if tokens.len() % 10 == 0 {
+            eval(&tokens)?;
+            let slice: Vec<u32> = tokens.drain(..).map(|t| t.item::<u32>()).collect();
+            let text = tokenizer.decode(&slice, true)?;
+            print!("{}", text);
+        }
+
+        if i >= 100 { break; }
+    }
+
+    Ok(())
+}
+```
+
+### Interactive chat
+
+Multi-turn conversation with chat templates:
+
+```bash
+cargo run --release --example chat_qwen3 -- ./Qwen3-4B-bf16
+```
+
+This example demonstrates:
+- Loading chat templates from `tokenizer_config.json`
+- Building conversation history
+- Streaming token output
+- EOS token detection for Qwen3 (tokens 151643, 151645)
+
+See [examples/chat_qwen3.rs](https://github.com/moxin-org/OminiX-MLX/blob/main/qwen3-mlx/examples/chat_qwen3.rs) for the full implementation.
+
+## Supported models
+
+<CardGroup cols={2}>
+  <Card title="Qwen3-0.6B" icon="feather">
+    **Size**: 1.2 GB  
+    **Use case**: Embedded applications, testing  
+    **HF path**: `mlx-community/Qwen3-0.6B-bf16`
+  </Card>
+
+  <Card title="Qwen3-1.7B" icon="cube">
+    **Size**: 3.4 GB  
+    **Use case**: Resource-constrained deployments  
+    **HF path**: `mlx-community/Qwen3-1.7B-bf16`
+  </Card>
+
+  <Card title="Qwen3-4B" icon="box">
+    **Size**: 8 GB  
+    **Use case**: General-purpose chat, recommended  
+    **HF path**: `mlx-community/Qwen3-4B-bf16`
+  </Card>
+
+  <Card title="Qwen3-8B" icon="cubes">
+    **Size**: 16 GB  
+    **Use case**: Higher quality responses  
+    **HF path**: `mlx-community/Qwen3-8B-bf16`
+  </Card>
+
+  <Card title="Qwen3-14B" icon="layer-group">
+    **Size**: 28 GB  
+    **Use case**: Advanced reasoning  
+    **HF path**: `mlx-community/Qwen3-14B-bf16`
+  </Card>
+
+  <Card title="Qwen3-32B" icon="server">
+    **Size**: 64 GB  
+    **Use case**: Maximum quality (requires M3 Max 128GB)  
+    **HF path**: `mlx-community/Qwen3-32B-bf16`
+  </Card>
+</CardGroup>
+
+### Quantized variants
+
+All models available with 4-bit quantization for 4x memory reduction:
+
+```bash
+# Example: Qwen3-8B quantized to 4 bits
+huggingface-cli download mlx-community/Qwen3-8B-4bit --local-dir ./models/Qwen3-8B-4bit
+```
+
+Replace `-bf16` with `-4bit` in any HuggingFace path above.
+
+## Performance
+
+### Benchmark results (Apple M3 Max, 40-core GPU)
+
+| Model | Precision | Prompt Speed | Decode Speed | Memory |
+|-------|-----------|--------------|--------------|--------|
+| Qwen3-4B | bf16 | 150 tok/s | 45 tok/s | 8 GB |
+| Qwen3-4B | 4-bit | 250 tok/s | 75 tok/s | 3 GB |
+
+4-bit quantization provides:
+- **1.67x faster prompt processing**
+- **1.67x faster token generation**
+- **2.67x less memory usage**
+
+With minimal quality degradation for most tasks.
+
+### Speed vs sequence length
+
+Prompt processing speed scales linearly with input length, while decode speed remains constant per token. For a 1000-token input:
+
+- **Qwen3-4B (4-bit)**: ~4 seconds prefill time
+- **Decode**: 75 tokens/second regardless of context length
+
+## Converting models
+
+Convert any Qwen3 model from HuggingFace:
+
+```bash
+# Install mlx-lm
+pip install mlx-lm
+
+# Convert with 4-bit quantization
+mlx_lm.convert --hf-path Qwen/Qwen3-4B -q
+
+# Convert without quantization
+mlx_lm.convert --hf-path Qwen/Qwen3-4B
+```
+
+Converted models are saved to `./mlx_model` by default.
+
+## API reference
+
+### Core functions
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model, Error>
+```
+
+Load a Qwen3 model from a directory containing:
+- `config.json` - Model configuration
+- `model.safetensors` or `model-*.safetensors` - Model weights
+
+```rust
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer, Error>
+```
+
+Load tokenizer from `tokenizer.json`.
+
+### Generation
+
+```rust
+pub struct Generate<C: KeyValueCache> {
+    // fields omitted
+}
+
+impl<C: KeyValueCache> Generate<C> {
+    pub fn new(
+        model: &mut Model,
+        cache: &mut Vec<C>,
+        temperature: f32,
+        prompt: &Array,
+    ) -> Self
+}
+```
+
+Iterator that yields generated tokens. Temperature of 0.0 enables greedy sampling.
+
+### KV cache types
+
+```rust
+pub type KVCache = (Array, Array);
+```
+
+Simple tuple cache for standard generation.
+
+## Troubleshooting
+
+### Out of memory errors
+
+Try these solutions in order:
+1. Use 4-bit quantized model instead of bf16
+2. Use smaller model (e.g., Qwen3-1.7B instead of Qwen3-4B)
+3. Reduce max token limit in generation
+4. Close other applications to free memory
+
+### Slow generation speed
+
+- Ensure you're using `--release` build mode
+- Verify Metal is enabled: check for GPU utilization in Activity Monitor
+- Update to latest macOS version for best Metal performance
+- Use quantized models for faster inference
+
+### Model download fails
+
+```bash
+# Authenticate with HuggingFace (if needed)
+huggingface-cli login
+
+# Set token for private models
+export HF_TOKEN=your_token_here
+```
+
+## Related models
+
+- [Qwen3-ASR](/asr/qwen3-asr) - Speech recognition with Qwen3 backbone
+- [Qwen-Image](/image/qwen-image) - Vision-language model with Qwen architecture

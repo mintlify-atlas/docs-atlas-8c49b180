@@ -1,0 +1,399 @@
+---
+title: Paraformer
+description: Non-autoregressive Chinese speech recognition with 18x+ real-time speed
+---
+
+Paraformer is a high-performance Chinese speech recognition model using non-autoregressive architecture to achieve 18-75x real-time transcription speeds on Apple Silicon.
+
+## Features
+
+- **18x+ real-time** transcription on Apple Silicon
+- **Pure Rust** - No Python dependencies at runtime
+- **Non-autoregressive** - Predicts all tokens in parallel for maximum speed
+- **GPU accelerated** - Metal GPU via MLX framework
+- **Production-ready** - Proven in FunASR framework with millions of deployments
+
+## Architecture
+
+Paraformer uses a unique non-autoregressive architecture that predicts all output tokens in parallel:
+
+```
+Audio (16kHz)
+    ↓
+[Mel Frontend] - 80 bins, 25ms window, 10ms hop, LFR 7/6
+    ↓
+[SAN-M Encoder] - 50 layers, 512 hidden, 4 heads
+    ↓
+[CIF Predictor] - Continuous Integrate-and-Fire
+    ↓
+[Bidirectional Decoder] - 16 layers, 512 hidden, 4 heads
+    ↓
+Tokens [8404 vocabulary]
+```
+
+### Key components
+
+**Mel Frontend**
+- 80 mel filterbanks
+- 25ms window, 10ms hop
+- Low Frame Rate (LFR) 7/6 downsampling
+
+**SAN-M Encoder**
+- 50 Transformer layers
+- 512 hidden dimensions
+- 4 attention heads
+- Self-attention with memory
+
+**CIF Predictor**
+- Continuous Integrate-and-Fire mechanism
+- Dynamic length prediction
+- Acoustic-linguistic alignment
+
+**Bidirectional Decoder**
+- 16 Transformer layers
+- 512 hidden dimensions
+- 4 attention heads
+- Parallel token prediction
+
+## Performance benchmarks
+
+Benchmarks on Apple M3 Max (48GB):
+
+| Audio duration | Inference time | RTF | Speed |
+|----------------|----------------|-----|-------|
+| 3s | 50ms | 0.017 | **59x real-time** |
+| 10s | 150ms | 0.015 | **67x real-time** |
+| 30s | 400ms | 0.013 | **75x real-time** |
+
+RTF = Real-Time Factor (lower is better). Speed varies with audio characteristics.
+
+## Model download and conversion
+
+<Warning>
+  The original FunASR model uses PyTorch format. You must convert it to MLX-compatible safetensors format before use.
+</Warning>
+
+<Steps>
+  <Step title="Download original model">
+    Download the Paraformer-large model from ModelScope:
+    
+    ```bash
+    git lfs install
+    git clone https://modelscope.cn/models/damo/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch.git ./paraformer-src
+    ```
+  </Step>
+  
+  <Step title="Convert to MLX format">
+    The converter is pure Rust - no Python or libtorch required:
+    
+    ```bash
+    cargo run --release --features convert --example convert_model -- \
+        ./paraformer-src \
+        ./models/paraformer
+    ```
+    
+    This will:
+    - Load the PyTorch model using candle-core
+    - Convert 956 tensors to MLX-compatible format
+    - Save as safetensors (smaller and faster to load)
+    - Copy auxiliary files (am.mvn, tokens.txt)
+  </Step>
+  
+  <Step title="Verify model directory">
+    Check that all required files are present:
+    
+    ```bash
+    ls models/paraformer/
+    # Output:
+    # paraformer.safetensors   # Model weights (converted)
+    # am.mvn                   # CMVN normalization
+    # tokens.txt               # Vocabulary (8404 tokens)
+    ```
+  </Step>
+</Steps>
+
+### Environment variables
+
+```bash
+# Set custom model path
+export FUNASR_MODEL_DIR=/path/to/paraformer
+
+# Or specify when running
+FUNASR_MODEL_DIR=./models/paraformer cargo run --example transcribe --release
+```
+
+## Quick start
+
+### Command-line usage
+
+```bash
+# Basic transcription
+cargo run --release --example transcribe -- audio.wav /path/to/model
+
+# Benchmark performance
+cargo run --release --example benchmark -- audio.wav /path/to/model 10
+```
+
+### Library usage
+
+```rust
+use funasr_mlx::{load_model, parse_cmvn_file, transcribe, Vocabulary};
+use funasr_mlx::audio::{load_wav, resample};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load and resample audio to 16kHz
+    let (samples, sample_rate) = load_wav("audio.wav")?;
+    let samples = resample(&samples, sample_rate, 16000);
+
+    // Load model with CMVN normalization
+    let mut model = load_model("paraformer.safetensors")?;
+    let (addshift, rescale) = parse_cmvn_file("am.mvn")?;
+    model.set_cmvn(addshift, rescale);
+
+    // Load vocabulary and transcribe
+    let vocab = Vocabulary::load("tokens.txt")?;
+    let text = transcribe(&mut model, &samples, &vocab)?;
+
+    println!("Transcription: {}", text);
+    Ok(())
+}
+```
+
+## API reference
+
+### Load model
+
+```rust
+use funasr_mlx::{load_model, parse_cmvn_file};
+use mlx_rs::module::Module;
+
+// Load model weights
+let mut model = load_model("models/paraformer/paraformer.safetensors")?;
+model.training_mode(false);
+
+// Load CMVN normalization parameters
+let (addshift, rescale) = parse_cmvn_file("models/paraformer/am.mvn")?;
+model.set_cmvn(addshift, rescale);
+```
+
+### Load vocabulary
+
+```rust
+use funasr_mlx::Vocabulary;
+
+let vocab = Vocabulary::load("models/paraformer/tokens.txt")?;
+println!("Loaded {} tokens", vocab.len());
+```
+
+### Load and preprocess audio
+
+```rust
+use funasr_mlx::audio::{load_wav, resample};
+
+// Load WAV file
+let (samples, sample_rate) = load_wav("audio.wav")?;
+let duration_secs = samples.len() as f32 / sample_rate as f32;
+
+// Resample to 16kHz if needed
+let samples = if sample_rate != 16000 {
+    resample(&samples, sample_rate, 16000)
+} else {
+    samples
+};
+```
+
+### Transcribe
+
+```rust
+use funasr_mlx::transcribe;
+
+// Transcribe audio samples
+let text = transcribe(&mut model, &samples, &vocab)?;
+println!("Result: {}", text);
+```
+
+## Example code
+
+Complete transcription example from `examples/transcribe.rs`:
+
+```rust
+use std::env;
+use std::time::Instant;
+use funasr_mlx::audio::{load_wav, resample};
+use funasr_mlx::{load_model, parse_cmvn_file, transcribe, Vocabulary};
+use mlx_rs::module::Module;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    
+    if args.len() < 3 {
+        eprintln!("Usage: {} <audio.wav> <model_dir>", args[0]);
+        std::process::exit(1);
+    }
+
+    let audio_path = &args[1];
+    let model_dir = &args[2];
+
+    // Construct paths
+    let weights_path = format!("{}/paraformer.safetensors", model_dir);
+    let cmvn_path = format!("{}/am.mvn", model_dir);
+    let vocab_path = format!("{}/tokens.txt", model_dir);
+
+    // Load audio
+    println!("Loading audio: {}", audio_path);
+    let (samples, sample_rate) = load_wav(audio_path)?;
+    let duration_secs = samples.len() as f32 / sample_rate as f32;
+    println!("  {:.2}s audio at {} Hz", duration_secs, sample_rate);
+
+    // Resample to 16kHz if needed
+    let samples = if sample_rate != 16000 {
+        println!("  Resampling to 16kHz...");
+        resample(&samples, sample_rate, 16000)
+    } else {
+        samples
+    };
+
+    // Load model
+    println!("\nLoading model from: {}", model_dir);
+    let mut model = load_model(&weights_path)?;
+    model.training_mode(false);
+
+    // Load CMVN
+    let (addshift, rescale) = parse_cmvn_file(&cmvn_path)?;
+    model.set_cmvn(addshift, rescale);
+
+    // Load vocabulary
+    let vocab = Vocabulary::load(&vocab_path)?;
+    println!("  {} tokens loaded", vocab.len());
+
+    // Transcribe
+    println!("\nTranscribing...");
+    let start = Instant::now();
+    let text = transcribe(&mut model, &samples, &vocab)?;
+    let elapsed = start.elapsed();
+
+    // Calculate metrics
+    let inference_ms = elapsed.as_millis();
+    let rtf = (inference_ms as f32 / 1000.0) / duration_secs;
+
+    println!("\n=== Results ===");
+    println!("Text: {}", text);
+    println!();
+    println!("Performance:");
+    println!("  Audio duration: {:.2}s", duration_secs);
+    println!("  Inference time: {} ms", inference_ms);
+    println!("  RTF: {:.4}x", rtf);
+    println!("  Speed: {:.1}x real-time", 1.0 / rtf);
+
+    Ok(())
+}
+```
+
+## Benchmark example
+
+Run multiple iterations to measure performance:
+
+```rust
+use std::time::Instant;
+use funasr_mlx::{load_model, parse_cmvn_file};
+use mlx_rs::transforms::eval;
+
+let iterations = 10;
+let mut times = Vec::with_capacity(iterations);
+
+// Warmup
+let token_ids = model.transcribe(&audio)?;
+eval([&token_ids])?;
+
+// Benchmark
+for i in 0..iterations {
+    let start = Instant::now();
+    let token_ids = model.transcribe(&audio)?;
+    eval([&token_ids])?;
+    let elapsed = start.elapsed();
+    times.push(elapsed.as_millis() as f64);
+}
+
+// Calculate statistics
+times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+let mean = times.iter().sum::<f64>() / times.len() as f64;
+let median = times[times.len() / 2];
+let rtf_mean = (mean / 1000.0) / duration_secs as f64;
+
+println!("Mean latency: {:.1} ms", mean);
+println!("Median latency: {:.1} ms", median);
+println!("Mean RTF: {:.4}x ({:.1}x real-time)", rtf_mean, 1.0 / rtf_mean);
+```
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+funasr-mlx = { path = "../funasr-mlx" }
+```
+
+Or from git:
+
+```toml
+[dependencies]
+funasr-mlx = { git = "https://github.com/oxideai/mlx-rs" }
+```
+
+## Project structure
+
+```
+funasr-mlx/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs            # Public API
+│   ├── audio.rs          # Mel spectrogram extraction
+│   ├── encoder.rs        # SAN-M encoder
+│   ├── decoder.rs        # Bidirectional decoder
+│   ├── cif.rs            # CIF predictor
+│   ├── vocab.rs          # Vocabulary loading
+│   └── error.rs          # Error types
+└── examples/
+    ├── transcribe.rs     # Basic transcription
+    ├── benchmark.rs      # Performance benchmarking
+    └── convert_model.rs  # PyTorch to MLX conversion
+```
+
+## Requirements
+
+- macOS 13.5+ (Ventura or later)
+- Apple Silicon (M1/M2/M3/M4)
+- Rust 1.82.0+
+
+## Why non-autoregressive?
+
+Traditional autoregressive ASR models (like Whisper) generate tokens one at a time, where each token depends on all previous tokens. This sequential nature limits parallelization and inference speed.
+
+Paraformer's non-autoregressive approach:
+1. **Predicts all tokens in parallel** - Dramatically faster inference
+2. **CIF mechanism** - Learns acoustic-linguistic alignment automatically
+3. **Bidirectional context** - Better accuracy than left-to-right models
+
+This makes Paraformer ideal for:
+- Real-time transcription applications
+- Batch processing of large audio datasets
+- Resource-constrained edge deployments
+
+## Limitations
+
+- **Chinese only** - Model is trained specifically for Chinese Mandarin
+- **Requires conversion** - Original PyTorch weights must be converted to MLX format
+- **Fixed vocabulary** - 8404 tokens, cannot be extended
+
+For multilingual support, consider [Qwen3-ASR](/asr/qwen3-asr) instead.
+
+## Credits
+
+- [FunASR](https://github.com/modelscope/FunASR) by Alibaba DAMO Academy
+- [Paraformer paper](https://arxiv.org/abs/2206.08317)
+- [mlx-rs](https://github.com/oxideai/mlx-rs) for Rust MLX bindings
+
+## License
+
+MIT OR Apache-2.0

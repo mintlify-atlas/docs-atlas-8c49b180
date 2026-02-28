@@ -1,0 +1,407 @@
+---
+title: Qwen3-ASR
+description: Multilingual speech recognition supporting 30+ languages with 30-50x real-time speed
+---
+
+Qwen3-ASR provides state-of-the-art multilingual speech recognition on Apple Silicon with support for 30+ languages and speeds up to 50x real-time on M4 Max.
+
+## Features
+
+- **30+ languages** - Chinese, English, Japanese, Korean, French, German, Spanish, and 23 more
+- **30x-50x real-time** on Apple Silicon (M-series) with 8-bit quantized models
+- **Long-form audio** - Automatic 30-second chunking for files of any length
+- **Config-driven** - One binary supports both 0.6B and 1.7B model sizes
+- **Zero Python** - Pure Rust implementation, no Python runtime needed
+- **Auto-build tokenizer** - Generates `tokenizer.json` from `vocab.json` + `merges.txt` if missing
+
+## Model variants
+
+<CardGroup cols={2}>
+  <Card title="Qwen3-ASR-1.7B-8bit" icon="star">
+    **Recommended**
+    
+    - Size: 2.46 GB
+    - Speed: ~30x real-time on M4 Max
+    - Best accuracy across all benchmarks
+    - HuggingFace: `mlx-community/Qwen3-ASR-1.7B-8bit`
+  </Card>
+  
+  <Card title="Qwen3-ASR-0.6B-8bit" icon="zap">
+    **Faster download**
+    
+    - Size: 1.01 GB
+    - Speed: ~22x real-time on M4 Max
+    - Good accuracy with smaller footprint
+    - HuggingFace: `mlx-community/Qwen3-ASR-0.6B-8bit`
+  </Card>
+</CardGroup>
+
+Speed measured on Apple M4 Max with 37-minute Chinese business meeting audio.
+
+## Quick start
+
+<Steps>
+  <Step title="Download the model">
+    Download either the 1.7B (recommended) or 0.6B model:
+    
+    ```bash
+    # 1.7B 8-bit (recommended, 2.46 GB)
+    huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+        --local-dir ~/.OminiX/models/qwen3-asr-1.7b
+    
+    # 0.6B 8-bit (faster download, 1.01 GB)
+    huggingface-cli download mlx-community/Qwen3-ASR-0.6B-8bit \
+        --local-dir ~/.OminiX/models/qwen3-asr-0.6b
+    ```
+  </Step>
+  
+  <Step title="Transcribe audio">
+    Run transcription with automatic language detection:
+    
+    ```bash
+    # Using default model (1.7B)
+    cargo run --release --example transcribe -- audio.wav
+    
+    # Using 0.6B model
+    cargo run --release --example transcribe -- ~/.OminiX/models/qwen3-asr-0.6b audio.wav
+    
+    # Specify language explicitly
+    cargo run --release --example transcribe -- audio.wav --language English
+    
+    # Non-WAV formats (requires ffmpeg)
+    cargo run --release --example transcribe -- meeting.m4a
+    ```
+  </Step>
+  
+  <Step title="Use as a library">
+    Integrate into your Rust application:
+    
+    ```rust
+    use qwen3_asr_mlx::{Qwen3ASR, default_model_path};
+    
+    let mut model = Qwen3ASR::load(default_model_path())?;
+    
+    // Simple transcription (default: Chinese)
+    let text = model.transcribe("audio.wav")?;
+    
+    // With language specification
+    let text = model.transcribe_with_language("audio.wav", "English")?;
+    
+    // From raw samples (16kHz mono f32)
+    let text = model.transcribe_samples(&samples, "Chinese")?;
+    ```
+  </Step>
+</Steps>
+
+## Architecture
+
+Qwen3-ASR uses an encoder-decoder architecture optimized for multilingual speech recognition:
+
+```
+Audio (16kHz) → 128-mel Spectrogram → Conv2d×3 (8× downsample)
+             → Transformer Encoder → Linear Projector → Qwen3 Decoder → Text
+```
+
+### Component details
+
+| Component | 0.6B | 1.7B |
+|-----------|------|------|
+| **Encoder layers** | 18 | 24 |
+| **Encoder d_model** | 896 | 1024 |
+| **Encoder heads** | 14 | 16 |
+| **Encoder FFN dim** | 3584 | 4096 |
+| **Decoder layers** | 28 | 28 |
+| **Decoder hidden** | 1024 | 2048 |
+| **Decoder heads (Q/KV)** | 16/8 | 16/8 |
+
+### Architecture components
+
+- **Audio frontend** - WhisperFeatureExtractor compatible (128 mels, n_fft=400, hop=160)
+- **Audio encoder** - 3× Conv2d (stride 2, GELU) + sinusoidal position embeddings + Transformer with windowed block attention
+- **Projector** - Linear(d_model → d_model, GELU) + Linear(d_model → decoder_hidden)
+- **Text decoder** - Qwen3 with GQA, Q/K RMSNorm, SwiGLU MLP, RoPE (theta=1M), tied embeddings
+
+## Supported languages
+
+Qwen3-ASR supports 30+ languages with state-of-the-art accuracy:
+
+**Primary languages:**
+Chinese, English, Cantonese, Arabic, German, French, Spanish, Portuguese, Indonesian, Italian, Korean, Russian, Thai, Vietnamese, Japanese, Turkish, Hindi, Malay, Dutch, Swedish, Danish, Finnish, Polish, Czech, Filipino, Persian, Greek, Romanian, Hungarian, Macedonian
+
+**Chinese dialects (22 additional):**
+Sichuan, Cantonese, Wu, Minnan, Hakka, and 17 more regional dialects
+
+## Benchmarks
+
+Qwen3-ASR-1.7B outperforms Whisper-large-v3 on nearly every benchmark:
+
+### Chinese Mandarin (CER ↓)
+
+| Dataset | Whisper-large-v3 | Qwen3-ASR-0.6B | **Qwen3-ASR-1.7B** |
+|---------|-----------------|----------------|---------------------|
+| WenetSpeech (meeting) | 19.11 | 6.88 | **5.88** |
+| AISHELL-2 | 5.06 | 3.15 | **2.71** |
+| SpeechIO | 7.56 | 3.44 | **2.88** |
+
+### English (WER ↓)
+
+| Dataset | Whisper-large-v3 | Qwen3-ASR-0.6B | **Qwen3-ASR-1.7B** |
+|---------|-----------------|----------------|---------------------|
+| LibriSpeech (other) | 3.97 | 4.55 | **3.38** |
+| GigaSpeech | 9.76 | 8.88 | **8.45** |
+| CommonVoice-en | 9.90 | 9.92 | **7.39** |
+
+### Multilingual (WER ↓, averaged)
+
+| Dataset | Whisper-large-v3 | Qwen3-ASR-0.6B | **Qwen3-ASR-1.7B** |
+|---------|-----------------|----------------|---------------------|
+| MLS | 8.62 | 13.19 | **8.55** |
+| CommonVoice | 10.77 | 12.75 | **9.18** |
+| Fleurs | 5.27 | 7.57 | **4.90** |
+
+Lower scores indicate better accuracy. CER = Character Error Rate, WER = Word Error Rate.
+
+## API reference
+
+### Load model
+
+```rust
+use qwen3_asr_mlx::{Qwen3ASR, default_model_path};
+
+// Load from default path (~/.OminiX/models/qwen3-asr-1.7b)
+let mut model = Qwen3ASR::load(default_model_path())?;
+
+// Load from custom path
+let mut model = Qwen3ASR::load("~/.OminiX/models/qwen3-asr-0.6b")?;
+```
+
+### Transcribe audio
+
+```rust
+// Transcribe WAV file (default: Chinese)
+let text = model.transcribe("audio.wav")?;
+
+// Transcribe with language specification
+let text = model.transcribe_with_language("audio.wav", "English")?;
+
+// Transcribe raw 16kHz f32 samples
+let text = model.transcribe_samples(&samples, "Japanese")?;
+```
+
+### Advanced configuration
+
+```rust
+use qwen3_asr_mlx::SamplingConfig;
+
+// Custom sampling configuration
+let config = SamplingConfig {
+    temperature: 0.0,
+    max_tokens: 8192,
+};
+
+// Transcribe with custom config
+let text = model.transcribe_samples_with_config(
+    &samples,
+    "Chinese",
+    &config
+)?;
+
+// Chunked processing for long audio (30-second chunks)
+let text = model.transcribe_samples_chunked(
+    &samples,
+    "Chinese",
+    &config,
+    30.0  // chunk duration in seconds
+)?;
+```
+
+### Model path resolution
+
+The model path is resolved in the following order:
+
+1. Explicit path passed to `Qwen3ASR::load()`
+2. `QWEN3_ASR_MODEL_PATH` environment variable
+3. `~/.OminiX/models/qwen3-asr-1.7b` (default)
+
+```bash
+# Set custom model path
+export QWEN3_ASR_MODEL_PATH=/path/to/model
+
+# Use in application
+cargo run --release --example transcribe -- audio.wav
+```
+
+## Audio input formats
+
+### WAV files
+
+Native support for WAV files with automatic resampling:
+- Any sample rate (automatically resampled to 16kHz)
+- Mono or stereo (stereo downmixed to mono)
+- 16/24/32-bit integer or float
+
+```rust
+let text = model.transcribe("audio.wav")?;
+```
+
+### Other formats (MP3, M4A, FLAC, etc.)
+
+Automatic conversion via ffmpeg (requires ffmpeg installed):
+
+```bash
+# Transcribe MP3
+cargo run --release --example transcribe -- audio.mp3
+
+# Transcribe M4A
+cargo run --release --example transcribe -- meeting.m4a
+```
+
+### Raw audio samples
+
+Direct input of 16kHz mono f32 samples:
+
+```rust
+// Load and resample audio
+let (samples, sample_rate) = load_audio("audio.wav")?;
+let samples = audio::resample(&samples, sample_rate, 16000)?;
+
+// Transcribe
+let text = model.transcribe_samples(&samples, "English")?;
+```
+
+## API server
+
+Qwen3-ASR is available via the unified OminiX-API server with OpenAI-compatible endpoints:
+
+```bash
+# Start API server
+cargo run --release -p ominix-api -- \
+    --asr-model ~/.OminiX/models/qwen3-asr-1.7b --port 8080
+
+# Transcribe (OpenAI Whisper-compatible multipart)
+curl http://localhost:8080/v1/audio/transcriptions \
+    -F file=@audio.wav -F language=Chinese
+
+# Transcribe (JSON)
+curl http://localhost:8080/v1/audio/transcriptions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "file_path": "audio.wav",
+      "language": "English",
+      "response_format": "verbose_json"
+    }'
+```
+
+See the [API Reference](/api/endpoints) for complete documentation.
+
+## Performance tips
+
+### Choose the right model size
+
+- **1.7B** - Best accuracy, suitable for production use with M3/M4 chips
+- **0.6B** - Faster inference, good for development or resource-constrained scenarios
+
+### Optimize for long audio
+
+Use chunked processing for audio longer than 30 seconds:
+
+```rust
+let text = model.transcribe_samples_chunked(
+    &samples,
+    "Chinese",
+    &config,
+    30.0  // 30-second chunks
+)?;
+```
+
+### Batch processing
+
+Process multiple files efficiently:
+
+```rust
+let mut model = Qwen3ASR::load(default_model_path())?;
+
+for audio_file in audio_files {
+    let text = model.transcribe(audio_file)?;
+    println!("{}\n{}", audio_file, text);
+}
+```
+
+## Weight format
+
+Models use safetensors format with two key prefixes:
+
+- `audio_tower.*` - Audio encoder (full precision fp16)
+- `model.*` - Text decoder (8-bit affine quantized, group_size=64)
+
+The audio encoder is **not** quantized to preserve audio feature quality, while the text decoder uses 8-bit quantization to reduce memory usage for the larger LLM component.
+
+## Requirements
+
+- macOS 13.5+ (Ventura or later)
+- Apple Silicon (M1/M2/M3/M4)
+- Rust 1.82.0+
+- Optional: ffmpeg for non-WAV audio formats
+
+## Project structure
+
+```
+qwen3-asr-mlx/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs         # Public API, model path resolution
+│   ├── error.rs       # Error types
+│   ├── audio.rs       # Mel spectrogram (128 mels, Slaney scale)
+│   ├── encoder.rs     # Audio encoder (Conv2d + Transformer)
+│   ├── qwen.rs        # Qwen3 text decoder (GQA, RoPE)
+│   └── model.rs       # Combined model, generation, weight loading
+└── examples/
+    └── transcribe.rs  # CLI transcription example
+```
+
+## Example code
+
+Complete transcription example from `examples/transcribe.rs`:
+
+```rust
+use qwen3_asr_mlx::{Qwen3ASR, default_model_path};
+use qwen3_asr_mlx::audio;
+use std::time::Instant;
+
+fn main() {
+    // Load model
+    println!("Loading model...");
+    let start = Instant::now();
+    let mut model = Qwen3ASR::load(default_model_path())
+        .expect("Failed to load model");
+    println!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
+
+    // Load and resample audio
+    let (samples, sample_rate) = audio::load_wav("audio.wav")
+        .expect("Failed to load audio");
+    let duration_secs = samples.len() as f32 / sample_rate as f32;
+    
+    let samples = audio::resample(&samples, sample_rate, 16000)
+        .expect("Resample failed");
+
+    // Transcribe
+    let start = Instant::now();
+    let text = model.transcribe_samples(&samples, "English")
+        .expect("Transcription failed");
+    let elapsed = start.elapsed().as_secs_f32();
+
+    println!("Transcription ({:.2}s, {:.1}x realtime):", 
+             elapsed, duration_secs / elapsed);
+    println!("{}", text);
+}
+```
+
+## Credits
+
+- [Qwen3-ASR](https://github.com/QwenLM/Qwen3-ASR) by the Qwen team at Alibaba Cloud
+- [mlx-community](https://huggingface.co/mlx-community) for quantized MLX model conversions
+- [mlx-rs](https://github.com/oxideai/mlx-rs) for Rust MLX bindings
+
+## License
+
+Apache-2.0 (same as Qwen3-ASR models)

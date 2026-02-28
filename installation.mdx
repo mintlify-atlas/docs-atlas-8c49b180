@@ -1,0 +1,252 @@
+---
+title: Installation
+description: Set up your development environment for OminiX-MLX on Apple Silicon
+---
+
+## Prerequisites
+
+Before installing OminiX-MLX, ensure your system meets these requirements:
+
+<CardGroup cols={2}>
+  <Card title="Operating system" icon="apple">
+    macOS 14.0+ (Sonoma) or newer
+  </Card>
+  <Card title="Hardware" icon="microchip">
+    Apple Silicon (M1, M2, M3, or M4 chip)
+  </Card>
+  <Card title="Rust" icon="rust">
+    Rust 1.82.0 or newer
+  </Card>
+  <Card title="Development tools" icon="hammer">
+    Xcode Command Line Tools
+  </Card>
+</CardGroup>
+
+<Note>
+  OminiX-MLX requires Apple Silicon to take advantage of Metal GPU acceleration and unified memory. Intel Macs are not supported.
+</Note>
+
+## Step 1: Install Xcode Command Line Tools
+
+The Command Line Tools provide essential build utilities and frameworks:
+
+```bash
+xcode-select --install
+```
+
+Verify the installation:
+
+```bash
+xcode-select -p
+# Should output: /Library/Developer/CommandLineTools
+```
+
+## Step 2: Install Rust
+
+If you don't have Rust installed, use rustup:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+After installation, reload your shell configuration:
+
+```bash
+source $HOME/.cargo/env
+```
+
+Verify Rust is installed and meets the minimum version:
+
+```bash
+rustc --version
+# Should output: rustc 1.82.0 or newer
+```
+
+<Tip>
+  If you have an older version of Rust, update it with `rustup update`.
+</Tip>
+
+## Step 3: Install HuggingFace CLI (optional)
+
+The HuggingFace CLI makes it easy to download pre-trained models:
+
+```bash
+pip install huggingface-hub
+```
+
+Verify the installation:
+
+```bash
+huggingface-cli --version
+```
+
+<Note>
+  While the HuggingFace CLI is optional, it's highly recommended for downloading models. Alternatively, you can download models manually from [huggingface.co](https://huggingface.co).
+</Note>
+
+## Step 4: Clone the repository
+
+Clone the OminiX-MLX repository:
+
+```bash
+git clone https://github.com/anthropics/OminiX-MLX.git
+cd OminiX-MLX
+```
+
+## Step 5: Build OminiX-MLX
+
+You can build all crates or just specific ones you need.
+
+<Tabs>
+  <Tab title="Build all crates">
+    ```bash
+    cargo build --release
+    ```
+
+    This will compile all model crates and core libraries. The first build may take 10-20 minutes.
+  </Tab>
+  
+  <Tab title="Build specific crate">
+    ```bash
+    # Example: Build only the Qwen3 LLM crate
+    cargo build --release -p qwen3-mlx
+    ```
+
+    This is faster and only compiles the crate you need along with its dependencies.
+  </Tab>
+</Tabs>
+
+<Warning>
+  Always use the `--release` flag for production builds. Debug builds are significantly slower and use more memory.
+</Warning>
+
+## Step 6: Verify installation
+
+Verify your installation by checking the built binaries:
+
+```bash
+ls -lh target/release/examples/
+```
+
+You should see example executables for the models you built.
+
+## Available crates
+
+OminiX-MLX is organized into multiple crates. Here are the main ones:
+
+### Core libraries
+
+| Crate | Description |
+|-------|-------------|
+| `mlx-rs` | Safe Rust bindings to Apple's MLX framework |
+| `mlx-rs-core` | Shared inference infrastructure (KV cache, RoPE, attention) |
+
+### Language models
+
+| Crate | Models | Sizes |
+|-------|--------|-------|
+| `qwen3-mlx` | Qwen2, Qwen3, Qwen3-MoE | 0.5B - 235B |
+| `glm4-mlx` | GLM-4 | 9B |
+| `glm4-moe-mlx` | GLM-4-MoE | 9B (45 experts) |
+| `mixtral-mlx` | Mixtral | 8x7B, 8x22B |
+| `mistral-mlx` | Mistral | 7B |
+| `minicpm-sala-mlx` | MiniCPM-SALA | 9B (1M context) |
+
+### Vision-language models
+
+| Crate | Models | Features |
+|-------|--------|----------|
+| `moxin-vlm-mlx` | Moxin-7B VLM | DINOv2 + SigLIP + Mistral-7B |
+
+### Speech recognition
+
+| Crate | Models | Languages |
+|-------|--------|--------|
+| `qwen3-asr-mlx` | Qwen3-ASR | 30+ languages |
+| `funasr-mlx` | Paraformer | Chinese, English |
+| `funasr-nano-mlx` | FunASR-Nano | Chinese, English |
+
+### Text-to-speech
+
+| Crate | Models | Features |
+|-------|--------|----------|
+| `gpt-sovits-mlx` | GPT-SoVITS | Few-shot voice cloning |
+
+### Image generation
+
+| Crate | Models | Notes |
+|-------|--------|-------|
+| `flux-klein-mlx` | FLUX.2-klein | Fast 4-step generation |
+| `zimage-mlx` | Z-Image | Lightweight generation |
+| `qwen-image-mlx` | Qwen Image | Qwen-based generation |
+
+### API server
+
+| Crate | Description |
+|-------|-------------|
+| `ominix-api` | Unified OpenAI-compatible API server for all models |
+
+## System requirements by model
+
+Different models have different memory requirements:
+
+| Model Size | Recommended RAM | Minimum RAM |
+|------------|----------------|-------------|
+| 0.5B - 2B | 8GB | 8GB |
+| 4B - 7B | 16GB | 12GB |
+| 9B | 24GB | 16GB |
+| 30B+ | 64GB+ | 32GB |
+| VLM (7B) | 24GB | 16GB |
+| ASR | 8GB | 8GB |
+| Image Gen | 32GB | 16GB |
+
+<Tip>
+  Use quantized models (8-bit or 4-bit) to reduce memory usage. For example, `Qwen3-4B-8bit` uses ~4GB instead of ~8GB.
+</Tip>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build fails with 'mlx-c not found'">
+    The MLX C bindings are included as a submodule. Make sure you cloned with submodules:
+    
+    ```bash
+    git submodule update --init --recursive
+    ```
+  </Accordion>
+  
+  <Accordion title="Linker errors about Metal framework">
+    Ensure you have the Xcode Command Line Tools installed:
+    
+    ```bash
+    xcode-select --install
+    ```
+  </Accordion>
+  
+  <Accordion title="Out of memory during build">
+    Build specific crates instead of all at once:
+    
+    ```bash
+    cargo build --release -p qwen3-mlx
+    ```
+  </Accordion>
+  
+  <Accordion title="Slow inference performance">
+    Make sure you're using `--release` builds. Debug builds are 10-100x slower:
+    
+    ```bash
+    cargo build --release
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Run your first model in under 5 minutes
+  </Card>
+  <Card title="LLM guide" icon="message" href="/models/llms">
+    Learn how to use language models
+  </Card>
+</CardGroup>

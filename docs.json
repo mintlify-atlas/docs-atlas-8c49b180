@@ -1,122 +1,157 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "OminiX-MLX",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#3B82F6",
+    "light": "#60A5FA",
+    "dark": "#2563EB"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/OminiX-ai/OminiX-MLX"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/OminiX-ai/OminiX-MLX"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/architecture",
+              "concepts/mlx-framework",
+              "concepts/unified-memory",
+              "concepts/lazy-evaluation"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Language Models",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "llm/overview",
+              "llm/qwen3",
+              "llm/glm4",
+              "llm/mixtral",
+              "llm/mistral",
+              "llm/minicpm-sala"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Vision-Language Models",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "vlm/overview",
+              "vlm/moxin"
+            ]
+          },
+          {
+            "group": "Speech Recognition",
+            "pages": [
+              "asr/overview",
+              "asr/qwen3-asr",
+              "asr/paraformer",
+              "asr/funasr-nano"
+            ]
+          },
+          {
+            "group": "Text-to-Speech",
+            "pages": [
+              "tts/overview",
+              "tts/gpt-sovits"
+            ]
+          },
+          {
+            "group": "Image Generation",
+            "pages": [
+              "image/overview",
+              "image/flux-klein",
+              "image/zimage",
+              "image/qwen-image"
+            ]
+          },
+          {
+            "group": "API Server",
+            "pages": [
+              "api/overview",
+              "api/ominix-api",
+              "api/endpoints"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/quantization",
+              "advanced/kv-cache",
+              "advanced/speculative-decoding",
+              "advanced/performance-tuning"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Core Libraries",
             "pages": [
-              "api-reference/introduction"
+              "api-reference/mlx-rs",
+              "api-reference/mlx-rs-core"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Language Models",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api-reference/qwen3-mlx",
+              "api-reference/glm4-mlx",
+              "api-reference/mixtral-mlx",
+              "api-reference/mistral-mlx",
+              "api-reference/minicpm-sala-mlx"
+            ]
+          },
+          {
+            "group": "Vision-Language",
+            "pages": [
+              "api-reference/moxin-vlm-mlx"
+            ]
+          },
+          {
+            "group": "Audio",
+            "pages": [
+              "api-reference/qwen3-asr-mlx",
+              "api-reference/funasr-mlx",
+              "api-reference/gpt-sovits-mlx"
+            ]
+          },
+          {
+            "group": "Image",
+            "pages": [
+              "api-reference/flux-klein-mlx",
+              "api-reference/zimage-mlx",
+              "api-reference/qwen-image-mlx"
+            ]
+          },
+          {
+            "group": "Server",
+            "pages": [
+              "api-reference/ominix-api"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

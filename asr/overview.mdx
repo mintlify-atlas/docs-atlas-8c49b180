@@ -1,0 +1,180 @@
+---
+title: Speech recognition overview
+description: High-performance automatic speech recognition on Apple Silicon with MLX
+---
+
+OminiX-MLX provides three state-of-the-art speech recognition models optimized for Apple Silicon, delivering 18-50x real-time transcription speeds through Metal GPU acceleration.
+
+## Available models
+
+<CardGroup cols={3}>
+  <Card title="Qwen3-ASR" icon="microphone" href="/asr/qwen3-asr">
+    Multilingual ASR supporting 30+ languages with 30-50x real-time speed
+  </Card>
+  <Card title="Paraformer" icon="waveform" href="/asr/paraformer">
+    Non-autoregressive Chinese ASR with 18x+ real-time speed
+  </Card>
+  <Card title="FunASR-Nano" icon="language" href="/asr/funasr-nano">
+    LLM-based 800M parameter model supporting 31 languages
+  </Card>
+</CardGroup>
+
+## Performance comparison
+
+| Model | Languages | Speed | Architecture | Parameters |
+|-------|-----------|-------|--------------|------------|
+| **Qwen3-ASR-1.7B** | 30+ languages | 30x RT | Encoder-decoder | 1.7B |
+| **Qwen3-ASR-0.6B** | 30+ languages | 22x RT | Encoder-decoder | 0.6B |
+| **Paraformer** | Chinese | 18-75x RT | Non-autoregressive | 220M |
+| **FunASR-Nano** | 31 languages | ~10x RT | LLM-based | 800M |
+
+Speed measured on Apple M3/M4 series chips. RT = real-time factor.
+
+## Key features
+
+### Pure Rust implementation
+
+All models are implemented in Rust with zero Python dependencies at runtime:
+- Native Metal GPU acceleration via MLX
+- Efficient memory management
+- Cross-platform binary distribution
+- Direct integration into Rust applications
+
+### Optimized for Apple Silicon
+
+- Metal GPU acceleration for neural network operations
+- Accelerate framework for audio processing (FFT, resampling)
+- 8-bit quantization support for reduced memory usage
+- Efficient batch processing for long-form audio
+
+### Production-ready API
+
+Unified API server provides OpenAI-compatible endpoints:
+
+```bash
+# Start API server
+cargo run --release -p ominix-api -- \
+    --asr-model ~/.OminiX/models/qwen3-asr-1.7b --port 8080
+
+# Transcribe audio (OpenAI Whisper-compatible)
+curl http://localhost:8080/v1/audio/transcriptions \
+    -F file=@audio.wav -F language=English
+```
+
+## Architecture overview
+
+### Qwen3-ASR architecture
+
+```
+Audio (16kHz) → 128-mel Spectrogram → Conv2d×3 (8× downsample)
+             → Transformer Encoder → Linear Projector → Qwen3 Decoder → Text
+```
+
+### Paraformer architecture
+
+```
+Audio (16kHz) → 80-mel Spectrogram → LFR 7/6
+             → SAN-M Encoder (50 layers) → CIF Predictor
+             → Bidirectional Decoder → Tokens (parallel)
+```
+
+### FunASR-Nano architecture
+
+```
+Audio (16kHz) → 80-mel Spectrogram → Whisper Encoder (frozen)
+             → Audio Adaptor → Qwen LLM → Text
+```
+
+## Supported audio formats
+
+All models support:
+- **WAV** - Native support (any sample rate, mono/stereo)
+- **MP3, M4A, FLAC, OGG, AAC** - Automatic conversion via ffmpeg
+- **Raw samples** - Direct `f32` array input at 16kHz
+
+Automatic resampling to 16kHz is handled internally.
+
+## Model selection guide
+
+### Choose Qwen3-ASR when you need:
+- Multilingual support (30+ languages)
+- Best accuracy on Chinese, English, Japanese, Korean
+- Long-form audio transcription (automatic 30s chunking)
+- Production-grade quality and speed balance
+
+### Choose Paraformer when you need:
+- Chinese-only transcription
+- Maximum speed (non-autoregressive)
+- Lower memory footprint
+- Extremely fast inference for short audio
+
+### Choose FunASR-Nano when you need:
+- 31 language support including dialects
+- Far-field/noisy environment robustness
+- Regional accent recognition
+- LLM-based semantic understanding
+
+## Quick start
+
+<Steps>
+  <Step title="Download a model">
+    Download any ASR model from HuggingFace:
+    
+    ```bash
+    # Qwen3-ASR-1.7B (recommended)
+    huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+        --local-dir ~/.OminiX/models/qwen3-asr-1.7b
+    
+    # Paraformer
+    git clone https://modelscope.cn/models/damo/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch.git
+    
+    # FunASR-Nano
+    huggingface-cli download mlx-community/Fun-ASR-Nano-2512-fp16 \
+        --local-dir ~/.OminiX/models/funasr-nano
+    ```
+  </Step>
+  
+  <Step title="Transcribe audio">
+    Use the command-line interface:
+    
+    ```bash
+    # Qwen3-ASR
+    cargo run --release --example transcribe -- audio.wav
+    
+    # Paraformer (after conversion)
+    cargo run --release --example transcribe -- audio.wav /path/to/paraformer
+    
+    # FunASR-Nano
+    cargo run --release --example transcribe -- audio.wav
+    ```
+  </Step>
+  
+  <Step title="Integrate into your application">
+    Use the Rust API:
+    
+    ```rust
+    use qwen3_asr_mlx::{Qwen3ASR, default_model_path};
+    
+    let mut model = Qwen3ASR::load(default_model_path())?;
+    let text = model.transcribe_with_language("audio.wav", "English")?;
+    println!("Transcription: {}", text);
+    ```
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Qwen3-ASR" icon="microphone" href="/asr/qwen3-asr">
+    Learn about the multilingual Qwen3-ASR models
+  </Card>
+  <Card title="Paraformer" icon="waveform" href="/asr/paraformer">
+    Explore the high-speed Paraformer Chinese ASR
+  </Card>
+  <Card title="FunASR-Nano" icon="language" href="/asr/funasr-nano">
+    Discover the LLM-based FunASR-Nano
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/audio-transcriptions">
+    View the unified API documentation
+  </Card>
+</CardGroup>

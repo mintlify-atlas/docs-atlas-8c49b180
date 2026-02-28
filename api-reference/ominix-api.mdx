@@ -1,0 +1,518 @@
+---
+title: 'OminiX-API server'
+description: 'Unified OpenAI-compatible HTTP API server for OminiX-MLX models'
+icon: 'server'
+---
+
+<Warning>
+  This crate is currently a work in progress. The implementation is planned but not yet complete.
+</Warning>
+
+## Overview
+
+`ominix-api` provides a unified OpenAI-compatible HTTP API server that exposes OminiX-MLX model crates (ASR, TTS, VLM, LLM) through a single HTTP server. This implementation makes the models drop-in compatible with OpenAI client libraries.
+
+The server implements the [OpenAI API](https://platform.openai.com/docs/api-reference) surface, allowing you to use standard OpenAI SDKs and tools with local OminiX-MLX models.
+
+## Installation
+
+Build from source in the OminiX-MLX workspace:
+
+```bash
+cargo build --release -p ominix-api
+```
+
+## Usage
+
+### Basic server startup
+
+```bash
+# Start server with ASR feature (enabled by default)
+cargo run --release -p ominix-api -- \
+    --asr-model ~/.OminiX/models/qwen3-asr-1.7b \
+    --port 8080
+```
+
+### Making requests
+
+<CodeGroup>
+```bash Multipart transcription
+# OpenAI Whisper-compatible multipart upload
+curl http://localhost:8080/v1/audio/transcriptions \
+    -F file=@audio.wav \
+    -F language=Chinese
+```
+
+```bash JSON transcription
+# JSON body request
+curl http://localhost:8080/v1/audio/transcriptions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "file_path": "audio.wav",
+      "language": "English"
+    }'
+```
+</CodeGroup>
+
+## Server configuration
+
+### Command-line arguments
+
+<ParamField path="asr-model" type="string">
+  Path to the ASR model directory (e.g., `~/.OminiX/models/qwen3-asr-1.7b`)
+</ParamField>
+
+<ParamField path="port" type="number" default="8080">
+  Server port to bind to
+</ParamField>
+
+<ParamField path="models-dir" type="string" default="~/.ominix/models">
+  Directory for storing downloaded models
+</ParamField>
+
+### Environment variables
+
+<ParamField path="HF_TOKEN" type="string">
+  HuggingFace API token for downloading gated models. Can also be stored in `~/.cache/huggingface/token`
+</ParamField>
+
+## API endpoints
+
+### Audio transcription
+
+<Card title="POST /v1/audio/transcriptions" icon="microphone">
+  Transcribe audio to text using the Qwen3-ASR model
+</Card>
+
+#### Request (multipart)
+
+<ParamField body="file" type="file" required>
+  Audio file to transcribe (WAV format recommended)
+</ParamField>
+
+<ParamField body="language" type="string">
+  Language of the audio (e.g., "English", "Chinese"). If not specified, the model will auto-detect
+</ParamField>
+
+#### Request (JSON)
+
+<ParamField body="file_path" type="string" required>
+  Path to the audio file on the server
+</ParamField>
+
+<ParamField body="language" type="string">
+  Language of the audio content
+</ParamField>
+
+#### Response
+
+<ResponseField name="text" type="string">
+  The transcribed text from the audio file
+</ResponseField>
+
+<ResponseField name="language" type="string">
+  The detected or specified language
+</ResponseField>
+
+<ResponseField name="duration" type="number">
+  Duration of the audio in seconds
+</ResponseField>
+
+### Chat completions (planned)
+
+<Card title="POST /v1/chat/completions" icon="comments">
+  Generate chat completions using LLM models
+</Card>
+
+This endpoint is planned for future implementation and will provide OpenAI-compatible chat completions.
+
+#### Request
+
+<ParamField body="messages" type="array" required>
+  Array of message objects with `role` and `content` fields
+  
+  <Expandable title="Message object">
+    <ResponseField name="role" type="string">
+      One of: "system", "user", or "assistant"
+    </ResponseField>
+    <ResponseField name="content" type="string">
+      The message content
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="model" type="string" default="minicpm-sala-9b">
+  Model identifier to use for generation
+</ParamField>
+
+<ParamField body="max_tokens" type="number" default="2048">
+  Maximum number of tokens to generate
+</ParamField>
+
+<ParamField body="temperature" type="number" default="0.7">
+  Sampling temperature between 0 and 2. Higher values make output more random
+</ParamField>
+
+#### Response
+
+<ResponseField name="id" type="string">
+  Unique identifier for this completion
+</ResponseField>
+
+<ResponseField name="object" type="string">
+  Always "chat.completion"
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  The model used for generation
+</ResponseField>
+
+<ResponseField name="choices" type="array">
+  Array of completion choices (typically one)
+  
+  <Expandable title="Choice object">
+    <ResponseField name="index" type="number">
+      Choice index (0-based)
+    </ResponseField>
+    <ResponseField name="message" type="object">
+      Generated message object
+      
+      <Expandable title="Message">
+        <ResponseField name="role" type="string">
+          Always "assistant"
+        </ResponseField>
+        <ResponseField name="content" type="string">
+          Generated text content
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="finish_reason" type="string">
+      Reason completion stopped: "stop", "length", or "error"
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token usage statistics
+  
+  <Expandable title="Usage">
+    <ResponseField name="prompt_tokens" type="number">
+      Number of tokens in the prompt
+    </ResponseField>
+    <ResponseField name="completion_tokens" type="number">
+      Number of tokens in the completion
+    </ResponseField>
+    <ResponseField name="total_tokens" type="number">
+      Total tokens used (prompt + completion)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Text-to-speech (planned)
+
+<Card title="POST /v1/audio/speech" icon="volume-up">
+  Generate speech audio from text using TTS models
+</Card>
+
+This endpoint is planned for integration with the `qwen3-tts-mlx` crate.
+
+#### Request
+
+<ParamField body="input" type="string" required>
+  The text to convert to speech
+</ParamField>
+
+<ParamField body="model" type="string" default="qwen3-tts">
+  TTS model identifier
+</ParamField>
+
+<ParamField body="voice" type="string">
+  Voice preset to use for generation
+</ParamField>
+
+#### Response
+
+Returns binary audio data (WAV or MP3 format) with appropriate `Content-Type` header.
+
+### Model management
+
+<Card title="GET /v1/models" icon="list">
+  List all available models with metadata
+</Card>
+
+#### Response
+
+<ResponseField name="object" type="string">
+  Always "list"
+</ResponseField>
+
+<ResponseField name="data" type="array">
+  Array of model objects
+  
+  <Expandable title="Model object">
+    <ResponseField name="id" type="string">
+      Model identifier
+    </ResponseField>
+    <ResponseField name="object" type="string">
+      Always "model"
+    </ResponseField>
+    <ResponseField name="owned_by" type="string">
+      Owner of the model (HuggingFace org or "local")
+    </ResponseField>
+    <ResponseField name="path" type="string">
+      Absolute path to model directory
+    </ResponseField>
+    <ResponseField name="loaded" type="boolean">
+      Whether this model is currently loaded in memory
+    </ResponseField>
+    <ResponseField name="repo_id" type="string">
+      HuggingFace repository ID (if downloaded from HuggingFace)
+    </ResponseField>
+    <ResponseField name="quantization" type="object">
+      Quantization settings if model is quantized
+      
+      <Expandable title="Quantization">
+        <ResponseField name="bits" type="number">
+          Quantization bit width (e.g., 4, 8)
+        </ResponseField>
+        <ResponseField name="group_size" type="number">
+          Group size for quantization
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    <ResponseField name="size_bytes" type="number">
+      Total size of model weights in bytes
+    </ResponseField>
+    <ResponseField name="downloaded_at" type="string">
+      ISO 8601 timestamp of download (if applicable)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Card title="POST /v1/models/download" icon="download">
+  Download a model from HuggingFace Hub
+</Card>
+
+#### Request
+
+<ParamField body="repo_id" type="string" required>
+  HuggingFace repository ID (e.g., "OminiX/qwen3-asr-1.7b-8bit")
+</ParamField>
+
+#### Response
+
+<ResponseField name="status" type="string">
+  Download status: "downloading", "complete", or "failed"
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Model identifier (derived from repo name)
+</ResponseField>
+
+<ResponseField name="repo_id" type="string">
+  HuggingFace repository ID
+</ResponseField>
+
+<Card title="DELETE /v1/models/{id}" icon="trash">
+  Delete a downloaded model from disk
+</Card>
+
+#### Response
+
+<ResponseField name="id" type="string">
+  Model identifier that was deleted
+</ResponseField>
+
+<ResponseField name="deleted" type="boolean">
+  Always true on success
+</ResponseField>
+
+### Health check
+
+<Card title="GET /health" icon="heart-pulse">
+  Check server health status
+</Card>
+
+#### Response
+
+<ResponseField name="status" type="string">
+  Always "ok" if server is running
+</ResponseField>
+
+## Features
+
+The server supports feature flags to enable/disable specific model capabilities:
+
+<ParamField path="asr" type="feature" default="enabled">
+  Enable ASR (Automatic Speech Recognition) endpoint via `qwen3-asr-mlx` crate
+</ParamField>
+
+Build with specific features:
+
+```bash
+# ASR only (default)
+cargo build --release -p ominix-api
+
+# Disable ASR
+cargo build --release -p ominix-api --no-default-features
+```
+
+## Dependencies
+
+The server is built on the following core dependencies:
+
+### HTTP server
+- **hyper** v1 - High-performance HTTP server
+- **tokio** v1 - Async runtime
+- **http-body-util** - HTTP body utilities
+
+### Serialization
+- **serde** + **serde_json** - JSON serialization
+
+### Model integration
+- **qwen3-asr-mlx** - ASR model implementation (feature-gated)
+- **hf-hub** - HuggingFace model downloading
+
+### Utilities
+- **clap** - Command-line argument parsing
+- **base64** - Audio encoding/decoding
+- **dirs** - System directory paths
+
+## Configuration file
+
+The server maintains a configuration file at `~/.ominix/config.json`:
+
+```json
+{
+  "models_dir": "/Users/username/.ominix/models",
+  "models": [
+    {
+      "id": "qwen3-asr-1.7b-8bit",
+      "repo_id": "OminiX/qwen3-asr-1.7b-8bit",
+      "path": "/Users/username/.ominix/models/qwen3-asr-1.7b-8bit",
+      "quantization": {
+        "bits": 8,
+        "group_size": 64
+      },
+      "size_bytes": 1789231104,
+      "downloaded_at": "2024-03-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+The configuration is automatically updated when models are downloaded or deleted through the API.
+
+## Error handling
+
+All API endpoints follow OpenAI error response format:
+
+```json
+{
+  "error": {
+    "message": "Description of what went wrong",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+### Error types
+
+- **invalid_request_error** - Malformed request or invalid parameters
+- **server_error** - Internal server error during processing
+- **not_found** - Resource not found
+- **conflict** - Operation conflicts with current state
+
+## CORS support
+
+The server includes CORS headers to allow cross-origin requests:
+
+- `Access-Control-Allow-Origin: *`
+- `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`
+- `Access-Control-Allow-Headers: Content-Type, Authorization`
+
+## Performance considerations
+
+### Model loading
+Models are loaded into memory on server startup and persist for the lifetime of the server process. Loading large models may take several seconds.
+
+### Inference threading
+Inference requests are processed sequentially on a dedicated worker thread to avoid GPU contention. For concurrent requests, consider running multiple server instances with different ports.
+
+### Memory usage
+Each loaded model consumes GPU memory proportional to its size. Ensure your system has sufficient memory for the models you plan to use:
+
+- 1.7B 8-bit model: ~2GB
+- 9B 8-bit model: ~9GB
+- 72B 4-bit model: ~36GB
+
+## Example integration
+
+### Python (OpenAI SDK)
+
+```python
+from openai import OpenAI
+
+# Point to local OminiX-API server
+client = OpenAI(
+    api_key="not-needed",
+    base_url="http://localhost:8080/v1"
+)
+
+# Transcribe audio
+with open("audio.wav", "rb") as f:
+    transcription = client.audio.transcriptions.create(
+        model="qwen3-asr",
+        file=f,
+        language="English"
+    )
+print(transcription.text)
+```
+
+### JavaScript (OpenAI SDK)
+
+```javascript
+import OpenAI from 'openai';
+import fs from 'fs';
+
+const client = new OpenAI({
+  apiKey: 'not-needed',
+  baseURL: 'http://localhost:8080/v1'
+});
+
+// Transcribe audio
+const transcription = await client.audio.transcriptions.create({
+  model: 'qwen3-asr',
+  file: fs.createReadStream('audio.wav'),
+  language: 'English'
+});
+console.log(transcription.text);
+```
+
+### cURL
+
+```bash
+# List available models
+curl http://localhost:8080/v1/models
+
+# Download a model
+curl -X POST http://localhost:8080/v1/models/download \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "OminiX/qwen3-asr-1.7b-8bit"}'
+
+# Transcribe audio
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F language=English
+
+# Health check
+curl http://localhost:8080/health
+```
+
+## License
+
+MIT OR Apache-2.0
+
+## Related crates
+
+- [qwen3-asr-mlx](/api-reference/qwen3-asr-mlx) - ASR model implementation

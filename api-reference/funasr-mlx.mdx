@@ -1,0 +1,367 @@
+---
+title: FunASR MLX
+description: Chinese speech recognition with FunASR Paraformer on Apple Silicon
+---
+
+# FunASR MLX
+
+FunASR speech recognition on Apple Silicon using MLX. Provides GPU-accelerated Chinese speech recognition using the Paraformer-large model from FunASR, optimized for Apple Silicon via MLX.
+
+## Features
+
+- **Non-autoregressive ASR**: Predicts all tokens in parallel (18x+ real-time)
+- **Pure Rust**: No Python dependencies at runtime
+- **GPU Accelerated**: Metal GPU via MLX for all operations
+- **High Quality**: FunASR-compatible audio preprocessing
+
+## Architecture
+
+The Paraformer model consists of:
+
+- **Mel Frontend**: 80-bin mel spectrogram with LFR stacking (7 frames, stride 6)
+- **SAN-M Encoder**: 50-layer self-attention with FSMN memory enhancement
+- **CIF Predictor**: Continuous integrate-and-fire for acoustic alignment
+- **Bidirectional Decoder**: 16-layer transformer decoder
+
+## Installation
+
+```bash
+cargo add funasr-mlx
+```
+
+## Quick start
+
+```rust
+use funasr_mlx::{load_model, parse_cmvn_file, transcribe};
+use funasr_mlx::audio::{load_wav, resample};
+
+// Load audio
+let (samples, sample_rate) = load_wav("audio.wav")?;
+let samples = resample(&samples, sample_rate, 16000);
+
+// Load model
+let mut model = load_model("paraformer.safetensors")?;
+let (addshift, rescale) = parse_cmvn_file("am.mvn")?;
+model.set_cmvn(addshift, rescale);
+
+// Transcribe
+let audio = mlx_rs::Array::from_slice(&samples, &[samples.len() as i32]);
+let token_ids = model.transcribe(&audio)?;
+```
+
+## Functions
+
+### load_model
+
+Load a Paraformer model from a safetensors file.
+
+```rust
+pub fn load_model(model_path: impl AsRef<Path>) -> Result<Paraformer, Error>
+```
+
+<ParamField path="model_path" type="impl AsRef<Path>" required>
+  Path to paraformer.safetensors file
+</ParamField>
+
+<ResponseField name="return" type="Result<Paraformer, Error>">
+  Loaded Paraformer model instance
+</ResponseField>
+
+### load_model_with_config
+
+Load a Paraformer model with custom configuration.
+
+```rust
+pub fn load_model_with_config(
+    model_path: impl AsRef<Path>,
+    config: ParaformerConfig,
+) -> Result<Paraformer, Error>
+```
+
+<ParamField path="model_path" type="impl AsRef<Path>" required>
+  Path to model safetensors file
+</ParamField>
+
+<ParamField path="config" type="ParaformerConfig" required>
+  Custom model configuration
+</ParamField>
+
+<ResponseField name="return" type="Result<Paraformer, Error>">
+  Loaded model with custom config
+</ResponseField>
+
+### parse_cmvn_file
+
+Parse CMVN (Cepstral Mean and Variance Normalization) file.
+
+```rust
+pub fn parse_cmvn_file(path: impl AsRef<Path>) -> Result<(Vec<f32>, Vec<f32>), Error>
+```
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to am.mvn file from FunASR model
+</ParamField>
+
+<ResponseField name="return" type="Result<(Vec<f32>, Vec<f32>), Error>">
+  Tuple of (addshift, rescale) vectors for normalization
+</ResponseField>
+
+### transcribe
+
+High-level transcription function.
+
+```rust
+pub fn transcribe(
+    model: &mut Paraformer,
+    audio: &[f32],
+    vocab: &Vocabulary,
+) -> Result<String, Error>
+```
+
+<ParamField path="model" type="&mut Paraformer" required>
+  Loaded Paraformer model with CMVN set
+</ParamField>
+
+<ParamField path="audio" type="&[f32]" required>
+  Audio samples as f32 in range [-1, 1]
+</ParamField>
+
+<ParamField path="vocab" type="&Vocabulary" required>
+  Vocabulary for decoding token IDs to text
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed Chinese text
+</ResponseField>
+
+### transcribe_with_punctuation
+
+Transcribe audio and apply punctuation restoration.
+
+```rust
+#[cfg(feature = "punctuation")]
+pub fn transcribe_with_punctuation(
+    model: &mut Paraformer,
+    audio: &[f32],
+    vocab: &Vocabulary,
+    punc_model: &mut punctuation::PunctuationModel,
+) -> Result<String, Error>
+```
+
+<ParamField path="model" type="&mut Paraformer" required>
+  Loaded Paraformer model
+</ParamField>
+
+<ParamField path="audio" type="&[f32]" required>
+  Audio samples
+</ParamField>
+
+<ParamField path="vocab" type="&Vocabulary" required>
+  Vocabulary for decoding
+</ParamField>
+
+<ParamField path="punc_model" type="&mut PunctuationModel" required>
+  CT-Transformer punctuation model
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed text with punctuation restored
+</ResponseField>
+
+Same as `transcribe` but passes result through CT-Transformer punctuation model.
+
+## Paraformer
+
+Main model struct for FunASR Paraformer.
+
+### Paraformer::transcribe
+
+Transcribe audio samples to token IDs.
+
+```rust
+pub fn transcribe(&mut self, audio: &Array) -> Result<Array, Error>
+```
+
+<ParamField path="audio" type="&Array" required>
+  Audio samples as MLX Array, shape [num_samples], 16kHz mono
+</ParamField>
+
+<ResponseField name="return" type="Result<Array, Error>">
+  Token IDs as MLX Array, shape [num_tokens]
+</ResponseField>
+
+### Paraformer::set_cmvn
+
+Set CMVN normalization parameters.
+
+```rust
+pub fn set_cmvn(&mut self, addshift: Vec<f32>, rescale: Vec<f32>)
+```
+
+<ParamField path="addshift" type="Vec<f32>" required>
+  Additive shift for mean normalization
+</ParamField>
+
+<ParamField path="rescale" type="Vec<f32>" required>
+  Multiplicative rescale for variance normalization
+</ParamField>
+
+## Vocabulary
+
+Vocabulary for decoding token IDs to text.
+
+### Vocabulary::load
+
+Load vocabulary from a text file.
+
+```rust
+pub fn load(path: impl AsRef<Path>) -> Result<Self, Error>
+```
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to tokens.txt or vocab.txt (one token per line)
+</ParamField>
+
+<ResponseField name="return" type="Result<Vocabulary, Error>">
+  Loaded vocabulary with 8404 tokens
+</ResponseField>
+
+### Vocabulary::decode
+
+Decode token IDs to text.
+
+```rust
+pub fn decode(&self, token_ids: &[i32]) -> String
+```
+
+<ParamField path="token_ids" type="&[i32]" required>
+  Array of token IDs from model output
+</ParamField>
+
+<ResponseField name="return" type="String">
+  Decoded text with special tokens filtered
+</ResponseField>
+
+Filters special tokens: `<blank>`, `<s>`, `</s>`, `<unk>`, `<pad>`.
+
+### Vocabulary::len
+
+Get the number of tokens in vocabulary.
+
+```rust
+pub fn len(&self) -> usize
+```
+
+<ResponseField name="return" type="usize">
+  Number of tokens (typically 8404)
+</ResponseField>
+
+## MelFrontend
+
+Mel spectrogram frontend for audio preprocessing.
+
+### MelFrontend::new
+
+Create a new mel frontend.
+
+```rust
+pub fn new(config: &ParaformerConfig) -> Self
+```
+
+<ParamField path="config" type="&ParaformerConfig" required>
+  Model configuration
+</ParamField>
+
+<ResponseField name="return" type="MelFrontend">
+  Mel frontend with 80-bin mel filters and FFT planner
+</ResponseField>
+
+## Types
+
+### ParaformerConfig
+
+Configuration for Paraformer model.
+
+```rust
+pub struct ParaformerConfig {
+    // Audio frontend
+    pub sample_rate: i32,      // 16000
+    pub n_mels: i32,           // 80
+    pub n_fft: i32,            // 400 (25ms window)
+    pub hop_length: i32,       // 160 (10ms hop)
+    pub lfr_m: i32,            // 7 (stack 7 frames)
+    pub lfr_n: i32,            // 6 (subsample by 6)
+    
+    // Encoder
+    pub encoder_dim: i32,      // 512
+    pub encoder_layers: i32,   // 50
+    pub encoder_heads: i32,    // 4
+    pub encoder_ffn_dim: i32,  // 2048
+    pub sanm_kernel_size: i32, // 11
+    pub dropout: f32,          // 0.1
+    
+    // CIF Predictor
+    pub cif_threshold: f32,    // 1.0
+    pub cif_tail_threshold: f32, // 0.45
+    pub cif_l_order: i32,      // 1
+    pub cif_r_order: i32,      // 1
+    
+    // Decoder
+    pub decoder_dim: i32,      // 512
+    pub decoder_layers: i32,   // 16
+    pub decoder_heads: i32,    // 4
+    pub decoder_ffn_dim: i32,  // 2048
+    
+    // Output
+    pub vocab_size: i32,       // 8404
+}
+```
+
+### Error
+
+Error type for FunASR operations.
+
+```rust
+pub enum Error {
+    Audio(String),
+    ModelLoad(String),
+    Inference(String),
+    Io(std::io::Error),
+}
+```
+
+## Model files
+
+You need to download and convert the FunASR Paraformer-large model:
+
+1. **Weights**: `paraformer.safetensors` (converted from FunASR PyTorch)
+2. **CMVN**: `am.mvn` (from FunASR model directory)
+3. **Vocabulary**: `tokens.txt` or `vocab.txt` (8404 tokens)
+
+## Audio preprocessing
+
+### Audio requirements
+
+- **Sample rate**: 16kHz
+- **Format**: Mono, f32 samples in range [-1, 1]
+- **Processing**: Mel spectrogram with LFR (Low Frame Rate) stacking
+
+### load_wav
+
+Load audio from WAV file.
+
+```rust
+use funasr_mlx::audio::load_wav;
+
+let (samples, sample_rate) = load_wav("audio.wav")?;
+```
+
+### resample
+
+Resample audio to target sample rate.
+
+```rust
+use funasr_mlx::audio::resample;
+
+let samples_16k = resample(&samples, 48000, 16000);
+```

@@ -1,0 +1,394 @@
+---
+title: MLX framework
+description: Learn about Apple's MLX machine learning framework and how OminiX-MLX leverages it for high-performance inference on Apple Silicon
+---
+
+## What is MLX?
+
+MLX is an array framework for machine learning research developed by Apple's machine learning research team. It's designed specifically for Apple Silicon and provides:
+
+- **Unified memory architecture**: CPU and GPU share the same memory pool
+- **Lazy evaluation**: Operations build computation graphs evaluated on-demand
+- **Dynamic computation graphs**: No recompilation needed when input shapes change
+- **Automatic differentiation**: Built-in gradient computation for training
+- **Metal acceleration**: Direct access to Apple's GPU via Metal framework
+- **Multi-device support**: Seamless execution on CPU or GPU
+
+<Info>
+MLX is to Apple Silicon what PyTorch is to CUDA GPUs - a native framework optimized for the hardware architecture.
+</Info>
+
+## Why MLX for Apple Silicon?
+
+### Metal GPU acceleration
+
+MLX uses Apple's Metal framework to access the GPU, providing:
+
+- **Native performance**: Direct Metal API calls without translation layers
+- **Optimized kernels**: Apple-tuned implementations of common operations
+- **Unified shader architecture**: Efficient compute shader compilation
+- **Low latency**: Minimal overhead between CPU and GPU operations
+
+```rust
+use mlx_rs::{Device, DeviceType, StreamOrDevice};
+
+// Operations automatically use GPU by default
+let device = Device::gpu();
+let stream = StreamOrDevice::gpu();
+
+let result = x.matmul(&y)?; // Executes on GPU via Metal
+```
+
+**Performance on M3 Max (128GB)**:
+- LLM inference: 25-45 tokens/second (4B-9B parameter models)
+- ASR transcription: 30-50x real-time processing
+- Image generation: 3-5 seconds per image
+
+### Unified memory model
+
+Unlike traditional GPU computing where data must be copied between CPU and GPU memory:
+
+```python
+# Traditional GPU (CUDA)
+x_cpu = torch.randn(1000, 1000)  # CPU memory
+x_gpu = x_cpu.cuda()              # Copy to GPU memory
+y_gpu = x_gpu @ x_gpu.T           # Compute on GPU
+y_cpu = y_gpu.cpu()               # Copy back to CPU
+```
+
+MLX arrays live in unified memory accessible by both CPU and GPU:
+
+```rust
+// MLX on Apple Silicon
+let x = mlx_rs::random::normal(&[1000, 1000], None, None, None)?;
+
+// No copying needed - both CPU and GPU can access x
+let y_cpu = ops::matmul(&x, &x.T()?, StreamOrDevice::cpu())?;
+let y_gpu = ops::matmul(&x, &x.T()?, StreamOrDevice::gpu())?;
+```
+
+See [Unified memory](/concepts/unified-memory) for details.
+
+### Lazy evaluation
+
+MLX builds computation graphs without executing operations immediately:
+
+```rust
+use mlx_rs::array;
+
+let a = array!([1, 2, 3, 4]);
+let b = array!([5, 6, 7, 8]);
+
+// These operations don't execute yet
+let c = &a + &b;  // Graph: c = add(a, b)
+let d = &c * 2;    // Graph: d = mul(add(a, b), 2)
+
+// Evaluation happens here
+d.eval()?;  // Executes optimized graph
+```
+
+Benefits:
+- **Kernel fusion**: Multiple operations combined into single GPU kernel
+- **Memory optimization**: Intermediate results avoided when possible
+- **Dead code elimination**: Unused computations never execute
+
+See [Lazy evaluation](/concepts/lazy-evaluation) for details.
+
+## MLX architecture
+
+### Layer structure
+
+```
+┌──────────────────────────────────────────┐
+│           Python/Rust API                │  High-level interface
+├──────────────────────────────────────────┤
+│           MLX C++ Core                   │  
+│  • Array abstraction                     │
+│  • Operation dispatch                    │  
+│  • Graph optimization                    │
+├──────────────────────────────────────────┤
+│        Backend Implementations           │
+│  ┌─────────────┐  ┌─────────────┐       │
+│  │   CPU       │  │    GPU      │       │
+│  │ (Accelerate)│  │  (Metal)    │       │
+│  └─────────────┘  └─────────────┘       │
+├──────────────────────────────────────────┤
+│        Hardware Abstraction              │
+│  • Unified Memory Controller             │
+│  • Metal API                             │
+│  • Accelerate Framework                  │
+└──────────────────────────────────────────┘
+                   │
+                   ▼
+┌──────────────────────────────────────────┐
+│         Apple Silicon (M1/M2/M3/M4)      │
+│  • ARM CPU cores (Performance + Efficient)│
+│  • GPU cores (Metal-optimized)           │
+│  • Neural Engine                         │
+│  • Unified Memory (shared DRAM)          │
+└──────────────────────────────────────────┘
+```
+
+### OminiX-MLX integration
+
+OminiX-MLX provides Rust bindings to MLX via three layers:
+
+**mlx-sys** (FFI layer)
+- Auto-generated bindings to MLX C API using bindgen
+- Raw pointers and C types (`mlx_array`, `mlx_device`, etc.)
+- Direct mapping to MLX functions with no overhead
+
+**mlx-rs** (Safe Rust API)
+- Safe wrappers around mlx-sys with automatic memory management
+- Idiomatic Rust types (`Array`, `Device`, `Stream`)
+- Compile-time safety and zero-cost abstractions
+
+**Model crates** (High-level)
+- Complete model implementations (transformers, encoders, etc.)
+- Weight loading and generation loops
+- Integration with tokenizers and audio/image processing
+
+## Core concepts
+
+### Arrays
+
+The fundamental data structure in MLX is the n-dimensional array:
+
+```rust
+use mlx_rs::{array, Array, Dtype};
+
+// Create arrays
+let a = array!([1, 2, 3, 4]);  // Shape: [4], dtype: int32
+let b = array!([[1.0, 2.0], [3.0, 4.0]]);  // Shape: [2, 2], dtype: float32
+
+// Array properties
+assert_eq!(a.shape(), &[4]);
+assert_eq!(a.dtype(), Dtype::Int32);
+assert_eq!(b.ndim(), 2);
+```
+
+Arrays are:
+- **Immutable by default**: Operations return new arrays
+- **Lazily evaluated**: Data only computed when needed
+- **Reference counted**: Automatic memory management
+- **Device-agnostic**: No explicit device placement
+
+### Devices
+
+MLX supports CPU and GPU devices:
+
+```rust
+use mlx_rs::{Device, DeviceType};
+
+// Create devices
+let cpu = Device::cpu();  // Device(cpu, 0)
+let gpu = Device::gpu();  // Device(gpu, 0)
+
+// Check device properties
+let device = Device::default();  // GPU by default
+assert_eq!(device.get_type()?, DeviceType::Gpu);
+assert_eq!(device.get_index()?, 0);
+
+// Set default device
+Device::set_default(&cpu);
+```
+
+See mlx-rs/src/device.rs:11 for implementation.
+
+### Streams
+
+Streams control where and how operations execute:
+
+```rust
+use mlx_rs::{Stream, StreamOrDevice};
+
+// Default streams
+let gpu_stream = Stream::gpu();
+let cpu_stream = Stream::cpu();
+
+// Operations specify execution stream
+let result = ops::add(&a, &b, StreamOrDevice::gpu())?;
+```
+
+**Key properties**:
+- Operations on the same stream execute sequentially
+- Operations on different streams can execute in parallel
+- MLX handles synchronization automatically
+- No explicit device-to-device transfers needed
+
+See mlx-rs/src/stream.rs:110 for implementation.
+
+### Operations
+
+MLX provides a comprehensive set of operations:
+
+**Element-wise operations**
+```rust
+let c = &a + &b;  // Addition
+let d = &a * &b;  // Multiplication
+let e = a.exp()?; // Exponential
+```
+
+**Linear algebra**
+```rust
+use mlx_rs::ops;
+
+let y = x.matmul(&w)?;              // Matrix multiplication
+let (q, r) = ops::qr(&a, None)?;    // QR decomposition
+let inv = ops::inv(&a)?;             // Matrix inverse
+```
+
+**Neural network layers**
+```rust
+use mlx_rs::nn;
+
+let linear = nn::Linear::new(128, 256)?;  // Linear layer
+let output = linear.forward(&input)?;
+
+let conv = nn::Conv2d::new(3, 64, 3)?;    // 2D convolution
+let features = conv.forward(&image)?;
+```
+
+**Reductions**
+```rust
+let sum = ops::sum(&a, None, None)?;     // Sum all elements
+let mean = ops::mean(&a, &[0], None)?;   // Mean along axis 0
+let max = ops::max(&a, &[1], None)?;     // Max along axis 1
+```
+
+## Performance features
+
+### Accelerate framework integration
+
+For CPU operations, MLX uses Apple's Accelerate framework:
+
+- **BLAS/LAPACK**: Optimized linear algebra routines
+- **vDSP**: Vector digital signal processing
+- **SIMD vectorization**: Automatic use of NEON instructions
+- **Multi-core parallelism**: Operations spread across CPU cores
+
+Enable with the `accelerate` feature flag (enabled by default):
+```toml
+[dependencies]
+mlx-rs = { version = "0.21", features = ["accelerate"] }
+```
+
+### Metal shader compilation
+
+MLX compiles optimized Metal shaders for GPU operations:
+
+1. **Operation graph construction**: Build computation graph
+2. **Kernel fusion**: Combine multiple ops into single shader
+3. **Metal shader generation**: Emit Metal Shading Language code
+4. **Compilation**: Compile to GPU binary
+5. **Execution**: Dispatch to GPU compute units
+
+```rust
+// This sequence gets fused into a single Metal kernel
+let x = ops::add(&a, &b, StreamOrDevice::gpu())?;
+let y = ops::mul(&x, &c, StreamOrDevice::gpu())?;
+let z = ops::relu(&y, StreamOrDevice::gpu())?;
+z.eval()?;  // Single kernel: z = relu((a + b) * c)
+```
+
+### Memory optimization
+
+MLX optimizes memory usage through:
+
+**In-place operations** (where safe):
+```rust
+// May reuse a's memory if no other references exist
+let result = &a + &b;
+```
+
+**Lazy materialization**:
+```rust
+let c = &a + &b;  // No memory allocated yet
+let d = &c * 2;    // Still no allocation
+d.eval()?;         // Memory allocated only for d (c may be skipped)
+```
+
+**Automatic garbage collection**:
+- Reference counting frees unused arrays
+- Graph evaluation clears intermediate results
+- No manual memory management required
+
+## Comparison with other frameworks
+
+| Feature | MLX | PyTorch | TensorFlow |
+|---------|-----|---------|------------|
+| **Target platform** | Apple Silicon | NVIDIA GPUs | Multi-platform |
+| **Memory model** | Unified | Separate CPU/GPU | Separate CPU/GPU |
+| **Evaluation** | Lazy | Eager (default) | Graph (v1) / Eager (v2) |
+| **Graph construction** | Dynamic | Dynamic | Static (v1) / Dynamic (v2) |
+| **GPU API** | Metal | CUDA | CUDA / ROCm |
+| **Rust bindings** | mlx-rs | tch-rs | tensorflow-rust |
+| **Memory overhead** | Low (unified) | High (copy overhead) | High (copy overhead) |
+
+<Note>
+MLX is optimized for Apple Silicon specifically. For NVIDIA GPUs, use PyTorch/TensorFlow with CUDA.
+</Note>
+
+## Feature flags
+
+Control MLX backend features via Cargo:
+
+```toml
+[dependencies]
+mlx-rs = { version = "0.21", features = ["metal", "accelerate"] }
+```
+
+| Flag | Description | Default |
+|------|-------------|------|
+| `metal` | Enable Metal GPU acceleration | ✓ On |
+| `accelerate` | Use Accelerate framework for CPU | ✓ On |
+
+Disabling features:
+```toml
+# CPU-only build (useful for CI without Metal)
+mlx-rs = { version = "0.21", default-features = false, features = ["accelerate"] }
+```
+
+## System requirements
+
+**Hardware**:
+- Apple Silicon Mac (M1, M2, M3, M4, or later)
+- Minimum 8GB unified memory (16GB+ recommended)
+- macOS 14.0 (Sonoma) or later
+
+**Software**:
+- Rust 1.82.0 or later
+- Xcode Command Line Tools
+- Metal support (included in macOS)
+
+<Tip>
+For best performance, use macOS 15+ which includes Metal 3 optimizations.
+</Tip>
+
+## Limitations
+
+**Platform-specific**: MLX only works on Apple Silicon Macs. It will not run on:
+- Intel Macs
+- Windows or Linux (even with ARM processors)
+- Cloud platforms without Apple Silicon instances
+
+**Not for training**: While MLX supports automatic differentiation, OminiX-MLX focuses on inference. Training large models requires Python's MLX for full ecosystem support.
+
+**Model availability**: Models must be converted to MLX format (typically via HuggingFace MLX community models).
+
+## Additional resources
+
+<CardGroup cols={2}>
+  <Card title="MLX GitHub" href="https://github.com/ml-explore/mlx" icon="github">
+    Official MLX repository and documentation
+  </Card>
+  <Card title="Unified memory" href="/concepts/unified-memory" icon="memory">
+    Deep dive into Apple Silicon's unified memory
+  </Card>
+  <Card title="Lazy evaluation" href="/concepts/lazy-evaluation" icon="clock">
+    How lazy evaluation optimizes performance
+  </Card>
+  <Card title="Architecture" href="/concepts/architecture" icon="diagram-project">
+    OminiX-MLX system architecture overview
+  </Card>
+</CardGroup>

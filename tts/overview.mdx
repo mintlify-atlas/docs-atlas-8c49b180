@@ -1,0 +1,129 @@
+---
+title: Text-to-speech overview
+description: High-quality speech synthesis on Apple Silicon with MLX acceleration
+---
+
+OminiX-MLX provides multiple text-to-speech (TTS) engines optimized for Apple Silicon, delivering natural-sounding voice synthesis with GPU acceleration.
+
+## Available TTS engines
+
+<CardGroup cols={2}>
+  <Card title="GPT-SoVITS" icon="waveform-lines" href="/tts/gpt-sovits">
+    Few-shot voice cloning with 4x real-time synthesis
+  </Card>
+  <Card title="Step-Audio 2" icon="microphone-lines" href="/tts/step-audio2">
+    Multimodal audio understanding and generation (planned)
+  </Card>
+  <Card title="Qwen3-TTS" icon="volume" href="/tts/qwen3-tts">
+    High-quality TTS from Alibaba (planned)
+  </Card>
+</CardGroup>
+
+## Key capabilities
+
+### Voice cloning
+
+Clone any voice with just a few seconds of reference audio. GPT-SoVITS supports both zero-shot (no reference text) and few-shot (with reference text) voice cloning modes.
+
+```rust
+use gpt_sovits_mlx::VoiceCloner;
+
+// Create voice cloner with default models
+let mut cloner = VoiceCloner::with_defaults()?;
+
+// Set reference audio for voice cloning
+cloner.set_reference_audio("reference.wav")?;
+
+// Synthesize speech
+let audio = cloner.synthesize("Hello, world!")?;
+
+// Save output
+cloner.save_wav(&audio, "output.wav")?;
+```
+
+### Mixed language support
+
+GPT-SoVITS handles mixed Chinese-English text naturally with automatic language detection and proper G2P (grapheme-to-phoneme) conversion.
+
+```rust
+// Mixed language synthesis works automatically
+let audio = cloner.synthesize("你好 world! 今天天气 is great!")?;
+```
+
+### High performance
+
+All TTS engines leverage Metal GPU acceleration via MLX for maximum performance on Apple Silicon:
+
+| Engine | Real-time Factor | Quality | Voice Cloning |
+|--------|-----------------|---------|---------------|
+| GPT-SoVITS | 4x | High | Yes |
+| Step-Audio 2 | TBD | Very High | Yes (planned) |
+| Qwen3-TTS | TBD | High | Planned |
+
+<Note>
+**Real-time factor** measures how fast audio is generated. 4x means a 2-second audio clip is generated in 0.5 seconds.
+</Note>
+
+## Performance metrics
+
+Benchmarks on Apple M3 Max for GPT-SoVITS:
+
+<Steps>
+  <Step title="Reference processing">
+    ~50ms for CNHubert encoding and quantization
+  </Step>
+  <Step title="BERT embedding">
+    ~20ms for text encoding
+  </Step>
+  <Step title="T2S generation">
+    ~100ms for GPT decoding (variable length)
+  </Step>
+  <Step title="VITS synthesis">
+    ~50ms for audio waveform generation
+  </Step>
+</Steps>
+
+**Total**: ~220ms for 2 seconds of audio output (4x real-time)
+
+## Shared infrastructure
+
+All TTS engines use common audio processing components from `mlx-rs-core`:
+
+- Audio I/O: `load_wav`, `save_wav`, `resample`
+- Signal processing: `compute_mel_spectrogram`
+- Caching: `KVCache`, `ConcatKeyValueCache` for autoregressive generation
+
+## System requirements
+
+<AccordionGroup>
+  <Accordion title="Hardware requirements">
+    - Apple Silicon Mac (M1/M2/M3/M4)
+    - macOS 13.0 or later
+    - 16GB RAM minimum (32GB recommended)
+    - 5GB disk space for models
+  </Accordion>
+
+  <Accordion title="Software requirements">
+    - Rust 1.75 or later
+    - Python 3.10+ (for one-time model setup only)
+    - No runtime Python dependencies
+  </Accordion>
+
+  <Accordion title="Model storage">
+    Models are stored in `~/.dora/models/primespeech/` by default:
+    - GPT-SoVITS: ~2GB
+    - Step-Audio 2: ~16GB (planned)
+    - Qwen3-TTS: Size TBD (planned)
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="GPT-SoVITS guide" icon="book" href="/tts/gpt-sovits">
+    Learn how to use voice cloning with GPT-SoVITS
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the TTS API documentation
+  </Card>
+</CardGroup>

@@ -1,0 +1,350 @@
+---
+title: Z-Image-Turbo
+description: Ultra-fast 9-step image generation with 6B Single-Stream DiT architecture
+---
+
+Z-Image-Turbo is a memory-efficient diffusion model using Single-Stream DiT (S3-DiT) architecture. Optimized for speed with 4-bit quantization, it achieves ~3s generation time using only ~3GB memory.
+
+## Features
+
+- **6B parameter S3-DiT**: Single-stream architecture for efficiency
+- **9-step turbo inference**: Distilled for fast generation (~3s/image)
+- **4-bit quantization**: Extreme memory efficiency (~3GB vs ~12GB)
+- **3-axis RoPE**: Optimized position encoding [32, 48, 48]
+- **Qwen3 text encoder**: Layer 34 embeddings for text conditioning
+
+## Installation
+
+The model downloads automatically from HuggingFace (no authentication required).
+
+<Steps>
+  <Step title="Run generation">
+    ```bash
+    # Quantized version (recommended)
+    cargo run --example generate_zimage_quantized --release -- "a beautiful sunset"
+    ```
+  </Step>
+
+  <Step title="Optional: Full precision">
+    ```bash
+    # Full precision (requires ~12GB memory)
+    cargo run --example generate_zimage --release -- "a beautiful sunset"
+    ```
+  </Step>
+</Steps>
+
+### Manual download
+
+```bash
+# Download MLX-optimized weights
+huggingface-cli download uqer1244/MLX-z-image --local-dir ./models/zimage
+
+# Or use git lfs
+git lfs install
+git clone https://huggingface.co/uqer1244/MLX-z-image ./models/zimage
+
+# Set custom path
+export ZIMAGE_MODEL_DIR=./models/zimage
+```
+
+## Usage
+
+### Command line
+
+<CodeGroup>
+```bash Quantized (recommended)
+# 4-bit quantization: ~3GB memory, ~3s generation
+cargo run --example generate_zimage_quantized --release -- \
+  "a cat sitting on a windowsill"
+```
+
+```bash Full precision
+# Full precision: ~12GB memory, ~2.5s generation
+cargo run --example generate_zimage --release -- \
+  "a majestic lion in the savanna"
+```
+</CodeGroup>
+
+### Library usage
+
+```rust
+use zimage_mlx::{
+    ZImageTransformer, ZImageConfig,
+    load_quantized_zimage_transformer,
+    load_quantized_qwen3_encoder,
+    create_coordinate_grid,
+};
+use flux_klein_mlx::{load_safetensors, Decoder, AutoEncoderConfig};
+use mlx_rs::Array;
+
+// Load quantized transformer
+let config = ZImageConfig::default();
+let weights = load_safetensors(&transformer_path)?;
+let mut transformer = load_quantized_zimage_transformer(weights, config)?;
+
+// Load quantized text encoder
+let encoder_weights = load_safetensors(&encoder_path)?;
+let text_encoder = load_quantized_qwen3_encoder(&encoder_weights, config)?;
+
+// Load VAE decoder
+let vae_config = AutoEncoderConfig::flux2();
+let mut vae = Decoder::new(vae_config)?;
+
+// Create position grids for RoPE
+let (h_tok, w_tok) = (height / 16, width / 16);
+let img_pos = create_coordinate_grid(
+    (1, h_tok, w_tok),
+    ((cap_len + 1) as i32, 0, 0),
+)?;
+let cap_pos = create_coordinate_grid(
+    (cap_len, 1, 1),
+    (1, 0, 0),
+)?;
+
+// Compute RoPE
+let (cos_cached, sin_cached) = transformer.compute_rope(&img_pos, &cap_pos)?;
+
+// Encode text
+let txt_embed = text_encoder.encode(&input_ids, Some(&attention_mask))?;
+
+// Denoise with turbo schedule
+for step in 0..9 {
+    let t = timesteps[step];
+    let latent = transformer.forward_with_rope(
+        &latent, &t, &txt_embed, &img_pos, &cap_pos,
+        &cos_cached, &sin_cached, None, None
+    )?;
+    // Euler step...
+}
+
+// Decode to image
+let image = vae.forward(&latent)?;
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                  Z-Image-Turbo Pipeline                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────┐    ┌──────────────────┐    ┌───────────┐  │
+│  │   Qwen3-4B  │    │  S3-DiT Blocks   │    │    VAE    │  │
+│  │   Encoder   │───▶│  Noise Refiner   │───▶│  Decoder  │  │
+│  │  Layer 34   │    │  Context Refiner │    │  32 ch    │  │
+│  │  (4-bit)    │    │  Joint Blocks    │    │           │  │
+│  └─────────────┘    └──────────────────┘    └───────────┘  │
+│        │                    │                      │        │
+│    [B,512,2560]        [B,1024,3072]          [B,H,W,3]    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key components
+
+**Text encoder (Qwen3 layer 34)**
+- Uses only layer 34 embeddings (not full 36 layers)
+- 4-bit quantized for memory efficiency
+- 2560 hidden dimensions
+- Outputs: [batch, 512, 2560]
+
+**Transformer (S3-DiT)**
+- Single-stream architecture (vs dual-stream in FLUX)
+- Noise refiner blocks: Process image latents
+- Context refiner blocks: Process text embeddings
+- Joint blocks: Fuse image and text features
+- 3-axis RoPE: [32, 48, 48] for (T, H, W)
+- 6B parameters total
+
+**VAE decoder**
+- Same as FLUX.2: 32 latent channels
+- 8× upsampling: 64×64 → 512×512
+
+### Denoising schedule
+
+Z-Image uses a turbo-distilled schedule optimized for 9 steps:
+
+```rust
+// Compute resolution-dependent shift
+fn calculate_shift(image_seq_len: i32) -> f32 {
+    let base_seq_len = 256.0f32;
+    let max_seq_len = 4096.0f32;
+    let base_shift = 0.5f32;
+    let max_shift = 1.15f32;
+    let m = (max_shift - base_shift) / (max_seq_len - base_seq_len);
+    let b = base_shift - m * base_seq_len;
+    (image_seq_len as f32) * m + b
+}
+
+let mu = calculate_shift(img_seq_len);
+
+// Generate 9-step schedule
+let timesteps: Vec<f32> = (0..=9)
+    .map(|i| {
+        let t = 1.0 - (i as f32) / 9.0;
+        if t > 0.0 {
+            mu.exp() / (mu.exp() + (1.0/t - 1.0))
+        } else {
+            0.0
+        }
+    })
+    .collect();
+
+// Euler integration
+for i in 0..9 {
+    let noise_pred = transformer.forward(...);
+    let dt = timesteps[i+1] - timesteps[i];
+    latents = latents + dt * (-noise_pred);  // Note: negative for Z-Image
+}
+```
+
+## Performance
+
+On Apple M3 Max (128GB):
+
+| Mode | Memory | Time (512×512) | Quality |
+|------|--------|----------------|----------|
+| 4-bit quantized | ~3GB | ~3s | Very good |
+| Full precision | ~12GB | ~2.5s | Excellent |
+
+### Comparison with FLUX.2-klein
+
+| Feature | Z-Image-Turbo | FLUX.2-klein |
+|---------|---------------|---------------|
+| Parameters | 6B | 4B |
+| Steps | 9 | 4 |
+| Architecture | S3-DiT (single stream) | Double + Single blocks |
+| RoPE axes | 3-axis [32,48,48] | 4-axis [32,32,32,32] |
+| Text encoder | Qwen3 layer 34 only | Qwen3 concat layers |
+| Quantized memory | ~3GB | ~8GB |
+| Speed | ~3s | ~5s |
+
+<Note>
+  Z-Image-Turbo is the most memory-efficient option, using only ~3GB with 4-bit quantization while maintaining excellent quality.
+</Note>
+
+## Configuration
+
+### Environment variables
+
+```bash
+# Custom model directory
+export ZIMAGE_MODEL_DIR=/path/to/zimage-model
+
+# Run with custom path
+ZIMAGE_MODEL_DIR=./models/zimage cargo run --example generate_zimage_quantized --release
+```
+
+### Model files structure
+
+```
+models/zimage/
+├── transformer/
+│   └── model.safetensors        # Quantized or full precision
+├── text_encoder/
+│   └── model.safetensors        # ~5GB (Qwen3 text encoder)
+├── vae/
+│   └── diffusion_pytorch_model.safetensors  # ~160MB
+└── tokenizer/
+    └── tokenizer.json
+```
+
+## Examples
+
+### Basic generation
+
+```bash
+cargo run --example generate_zimage_quantized --release -- \
+  "a beautiful sunset over the ocean"
+```
+
+### Benchmarking
+
+The quantized example includes built-in benchmarking:
+
+```rust
+// Warmup run
+let _ = transformer.forward_with_rope(...);
+
+// Timed generation
+let start = Instant::now();
+for step in 0..9 {
+    let step_start = Instant::now();
+    let out = transformer.forward_with_rope(...);
+    latents.eval()?;
+    println!("Step {}/9: {:.3}s", step + 1, step_start.elapsed().as_secs_f32());
+}
+let total_time = start.elapsed().as_secs_f32();
+println!("Total: {:.2}s", total_time);
+```
+
+## Advanced usage
+
+### RoPE position encoding
+
+Z-Image uses 3-axis RoPE with theta=256:
+
+```rust
+use zimage_mlx::create_coordinate_grid;
+
+// Image positions: (batch, h_tokens, w_tokens)
+let img_pos = create_coordinate_grid(
+    (1, 32, 32),           // 32x32 patches for 512x512 image
+    ((cap_len + 1) as i32, 0, 0),  // Offset after text
+)?;
+
+// Caption positions: (caption_len, 1, 1)
+let cap_pos = create_coordinate_grid(
+    (512, 1, 1),  // Max caption length
+    (1, 0, 0),    // Start at position 1
+)?;
+
+// Compute RoPE once
+let (cos, sin) = transformer.compute_rope(&img_pos, &cap_pos)?;
+```
+
+### Memory profiling
+
+```rust
+// Monitor memory usage during generation
+use std::time::Instant;
+
+let start = Instant::now();
+println!("Loading quantized transformer (4-bit)...");
+let transformer = load_quantized_zimage_transformer(weights, config)?;
+println!("Loaded in {:.2}s", start.elapsed().as_secs_f32());
+
+// 4-bit weights stay quantized in memory
+// Only dequantized during forward pass
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Model not found">
+    Z-Image requires the MLX-optimized weights:
+    - Use HuggingFace repo: `uqer1244/MLX-z-image`
+    - Not the original `Zheng-Peng-Fei/Z-Image`
+    - MLX version includes proper quantization
+  </Accordion>
+
+  <Accordion title="Out of memory (even quantized)">
+    4-bit quantization uses ~3GB, but you need headroom:
+    - Ensure at least 8GB unified memory
+    - Close other applications
+    - The full precision version needs 16GB+
+  </Accordion>
+
+  <Accordion title="Slower than expected">
+    - Use `--release` build flag
+    - First run includes compilation
+    - Warmup step is normal (see example code)
+    - Quantized version slightly slower than FP32
+  </Accordion>
+</AccordionGroup>
+
+## Resources
+
+- [HuggingFace MLX Model](https://huggingface.co/uqer1244/MLX-z-image)
+- [Original Z-Image](https://huggingface.co/Zheng-Peng-Fei/Z-Image)
+- [ModelScope Mirror](https://modelscope.cn/models/ZhengPengFei/Z-Image)

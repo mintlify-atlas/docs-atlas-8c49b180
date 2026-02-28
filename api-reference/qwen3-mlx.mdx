@@ -1,0 +1,309 @@
+---
+title: 'qwen3-mlx'
+description: 'Qwen model family inference on Apple Silicon with MLX'
+---
+
+## Overview
+
+The `qwen3-mlx` crate provides high-performance inference for the Qwen model family on Apple Silicon using MLX. It supports Qwen2, Qwen3, and Qwen3-MoE (Mixture of Experts) architectures with 4-bit quantization.
+
+## Supported models
+
+- **Qwen2** - Dense transformer architecture
+- **Qwen3** - Latest dense model with improved performance
+- **Qwen3-MoE** - Mixture of Experts for efficient scaling
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+qwen3-mlx = "0.1"
+```
+
+## Core functions
+
+### load_model
+
+Loads a Qwen model from a directory containing weights and configuration.
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model, Error>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Path to the model directory containing:
+  - `config.json` - Model configuration
+  - `model.safetensors.index.json` - Weight file index
+  - `model-*.safetensors` - Model weights
+</ParamField>
+
+<ResponseField name="Result<Model, Error>" type="Result">
+  Returns a loaded `Model` ready for inference, or an error if loading fails
+</ResponseField>
+
+### load_tokenizer
+
+Loads the tokenizer from the model directory.
+
+```rust
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer, Error>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Path to the model directory containing `tokenizer.json`
+</ParamField>
+
+<ResponseField name="Result<Tokenizer, Error>" type="Result">
+  Returns a HuggingFace `Tokenizer` instance
+</ResponseField>
+
+### get_model_args
+
+Parses model configuration from `config.json`.
+
+```rust
+pub fn get_model_args(model_dir: impl AsRef<Path>) -> Result<ModelArgs, Error>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Path to directory containing `config.json`
+</ParamField>
+
+<ResponseField name="Result<ModelArgs, Error>" type="Result">
+  Returns parsed `ModelArgs` with model hyperparameters
+</ResponseField>
+
+## Types
+
+### Model
+
+The main model struct for Qwen inference.
+
+```rust
+pub struct Model {
+    pub args: ModelArgs,
+    pub model: Qwen3Model,
+    pub lm_head: Option<MaybeQuantized<nn::Linear>>,
+}
+```
+
+<ParamField path="args" type="ModelArgs">
+  Model configuration and hyperparameters
+</ParamField>
+
+<ParamField path="model" type="Qwen3Model">
+  The core transformer model
+</ParamField>
+
+<ParamField path="lm_head" type="Option<MaybeQuantized<nn::Linear>>">
+  Language modeling head (None if `tie_word_embeddings` is true)
+</ParamField>
+
+### ModelArgs
+
+Model configuration parsed from `config.json`.
+
+```rust
+pub struct ModelArgs {
+    pub model_type: String,
+    pub hidden_size: i32,
+    pub num_hidden_layers: i32,
+    pub intermediate_size: i32,
+    pub num_attention_heads: i32,
+    pub rms_norm_eps: f32,
+    pub vocab_size: i32,
+    pub num_key_value_heads: i32,
+    pub max_position_embeddings: i32,
+    pub rope_theta: f32,
+    pub head_dim: i32,
+    pub tie_word_embeddings: bool,
+    pub rope_scaling: Option<HashMap<String, FloatOrString>>,
+    pub quantization: Option<QuantizationConfig>,
+}
+```
+
+### Generate
+
+Iterator for autoregressive text generation.
+
+```rust
+pub struct Generate<'a, C: KeyValueCache> {
+    model: &'a mut Model,
+    cache: &'a mut Vec<Option<C>>,
+    temp: f32,
+    state: GenerateState<'a>,
+    prefetched: Option<Array>,
+    token_count: usize,
+}
+```
+
+#### Constructor
+
+```rust
+pub fn new(
+    model: &'a mut Model,
+    cache: &'a mut Vec<Option<C>>,
+    temp: f32,
+    prompt_token: &'a Array,
+) -> Self
+```
+
+<ParamField path="model" type="&'a mut Model" required>
+  Mutable reference to the loaded model
+</ParamField>
+
+<ParamField path="cache" type="&'a mut Vec<Option<C>>" required>
+  KV cache for attention (initially empty)
+</ParamField>
+
+<ParamField path="temp" type="f32" required>
+  Sampling temperature (0.0 = greedy, higher = more random)
+</ParamField>
+
+<ParamField path="prompt_token" type="&'a Array" required>
+  Encoded prompt tokens as MLX array with shape `[1, seq_len]`
+</ParamField>
+
+### KVCache
+
+Key-value cache for attention layers.
+
+```rust
+pub struct KVCache {
+    pub keys: Option<Array>,
+    pub values: Option<Array>,
+}
+```
+
+## Example usage
+
+### Basic generation
+
+```rust
+use qwen3_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+
+let model_dir = "models/Qwen2.5-7B-Instruct";
+
+// Load model and tokenizer
+let tokenizer = load_tokenizer(model_dir)?;
+let mut model = load_model(model_dir)?;
+
+// Encode prompt
+let encoding = tokenizer.encode("Hello, how are", true)?;
+let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+// Initialize cache
+let mut cache = Vec::new();
+
+// Generate tokens
+let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+for token in generator.take(50) {
+    let token = token?;
+    let text = tokenizer.decode(&[token.item::<u32>()], true)?;
+    print!("{}", text);
+}
+```
+
+### With chat formatting
+
+```rust
+use qwen3_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+
+let model_dir = "models/Qwen2.5-7B-Instruct";
+let tokenizer = load_tokenizer(model_dir)?;
+let mut model = load_model(model_dir)?;
+
+// Format chat prompt
+let messages = vec![
+    ("system", "You are a helpful assistant."),
+    ("user", "What is the capital of France?"),
+];
+
+let prompt_text = messages
+    .iter()
+    .map(|(role, content)| format!("<|im_start|>{role}\n{content}<|im_end|>\n"))
+    .collect::<String>() + "<|im_start|>assistant\n";
+
+let encoding = tokenizer.encode(&prompt_text, true)?;
+let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+let mut cache = Vec::new();
+let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.6, &prompt);
+
+for token in generator.take(100) {
+    let token = token?;
+    let id = token.item::<u32>();
+    
+    // Stop on EOS
+    if id == 151643 || id == 151645 {
+        break;
+    }
+    
+    let text = tokenizer.decode(&[id], true)?;
+    print!("{}", text);
+}
+```
+
+## Architecture components
+
+### Attention
+
+Multi-head attention with grouped query attention (GQA) and RoPE.
+
+```rust
+pub struct Attention {
+    pub n_heads: i32,
+    pub n_kv_heads: i32,
+    pub scale: f32,
+    pub q_proj: MaybeQuantized<nn::Linear>,
+    pub k_proj: MaybeQuantized<nn::Linear>,
+    pub v_proj: MaybeQuantized<nn::Linear>,
+    pub o_proj: MaybeQuantized<nn::Linear>,
+    pub q_norm: nn::RmsNorm,
+    pub k_norm: nn::RmsNorm,
+    pub rope: nn::Rope,
+}
+```
+
+### Mlp
+
+Feed-forward network with SwiGLU activation.
+
+```rust
+pub struct Mlp {
+    pub gate_proj: MaybeQuantized<nn::Linear>,
+    pub up_proj: MaybeQuantized<nn::Linear>,
+    pub down_proj: MaybeQuantized<nn::Linear>,
+}
+```
+
+### TransformerBlock
+
+Single transformer layer combining attention and MLP.
+
+```rust
+pub struct TransformerBlock {
+    pub self_attn: Attention,
+    pub mlp: Mlp,
+    pub input_layernorm: nn::RmsNorm,
+    pub post_attention_layernorm: nn::RmsNorm,
+}
+```
+
+## Performance notes
+
+- **4-bit quantization** reduces memory by ~4x with minimal quality loss
+- **KV cache** eliminates redundant computation during autoregressive generation
+- **Metal acceleration** via MLX provides near-optimal Apple Silicon performance
+- **Grouped Query Attention** reduces memory bandwidth in multi-head attention
+
+## See also
+
+- [mistral-mlx](/api-reference/mistral-mlx) - Similar API for Mistral models
+- [glm4-mlx](/api-reference/glm4-mlx) - GLM-4 with partial RoPE
+- [mixtral-mlx](/api-reference/mixtral-mlx) - Mixture of Experts architecture

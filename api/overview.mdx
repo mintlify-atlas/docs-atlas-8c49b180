@@ -1,0 +1,156 @@
+---
+title: Overview
+description: OminiX-MLX unified API server for machine learning inference
+---
+
+## Introduction
+
+OminiX-MLX provides OpenAI-compatible API servers for running machine learning models on Apple Silicon. The API architecture enables easy integration with existing tools and frameworks while leveraging the performance benefits of MLX on M-series chips.
+
+## Server implementations
+
+OminiX-MLX includes multiple API server implementations:
+
+### OminiX-API (unified server)
+
+A unified HTTP server for all OminiX model types. Currently supports:
+
+- **ASR (Speech Recognition)**: Qwen3-ASR with 30+ languages
+- **Extensible**: Designed for LLM, VLM, and TTS support
+
+<Card title="OminiX-API server" icon="server" href="/api/ominix-api">
+  Learn about the unified API server architecture and capabilities
+</Card>
+
+### Model-specific servers
+
+Some model crates include their own OpenAI-compatible API servers:
+
+- **MiniCPM-SALA**: Full chat completion API with model management
+- **Future**: Additional model-specific servers planned
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="OpenAI-compatible" icon="code">
+    Drop-in replacement for OpenAI API endpoints with familiar request/response formats
+  </Card>
+  
+  <Card title="Metal acceleration" icon="gauge-high">
+    GPU-optimized inference using Apple's Metal framework for maximum performance
+  </Card>
+  
+  <Card title="Model management" icon="box">
+    Built-in model download, listing, and deletion via HTTP API
+  </Card>
+  
+  <Card title="Async runtime" icon="bolt">
+    Tokio-based async server with dedicated inference workers for high throughput
+  </Card>
+</CardGroup>
+
+## Common capabilities
+
+All API servers in the OminiX-MLX ecosystem share common patterns:
+
+### Health monitoring
+
+All servers expose a `/health` endpoint for monitoring and readiness checks:
+
+```bash
+curl http://localhost:8080/health
+```
+
+### Model management
+
+Servers support listing available models and downloading from HuggingFace:
+
+```bash
+# List models
+curl http://localhost:8080/v1/models
+
+# Download a model
+curl -X POST http://localhost:8080/v1/models/download \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "mlx-community/Qwen3-ASR-1.7B-8bit"}'
+
+# Delete a model
+curl -X DELETE http://localhost:8080/v1/models/Qwen3-ASR-1.7B-8bit
+```
+
+### CORS support
+
+All servers include CORS headers for web application integration:
+
+```
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS
+Access-Control-Allow-Headers: Content-Type, Authorization
+```
+
+## Performance characteristics
+
+| Model Type | Model Size | Throughput | Memory |
+|------------|------------|------------|--------|
+| ASR | Qwen3-ASR-1.7B-8bit | 30x real-time | 2.5GB |
+| ASR | Qwen3-ASR-0.6B-8bit | 50x real-time | 1.0GB |
+| LLM | MiniCPM-SALA-9B-8bit | 28 tok/s | 9.6GB |
+| LLM | Qwen3-4B | 45 tok/s | 8GB |
+
+<Note>
+  Performance benchmarks measured on Apple M3 Max with 128GB RAM. Actual performance varies based on hardware configuration and quantization settings.
+</Note>
+
+## Architecture
+
+### Request flow
+
+```
+┌─────────────┐
+│   Client    │
+│  (HTTP)     │
+└──────┬──────┘
+       │ POST /v1/...
+       ▼
+┌─────────────────────────────────────────┐
+│         Hyper HTTP Server               │
+│         (Tokio Runtime)                 │
+└──────┬──────────────────────────────────┘
+       │ async channel
+       ▼
+┌─────────────────────────────────────────┐
+│      Inference Worker Thread            │
+│  (dedicated blocking thread)            │
+├─────────────────────────────────────────┤
+│  • Load model (cached)                  │
+│  • Tokenize input                       │
+│  • Forward pass (Metal GPU)             │
+│  • Sample tokens                        │
+│  • Decode output                        │
+└──────┬──────────────────────────────────┘
+       │ result
+       ▼
+┌─────────────────────────────────────────┐
+│        JSON Response                    │
+│    (OpenAI-compatible)                  │
+└─────────────────────────────────────────┘
+```
+
+### Key design principles
+
+1. **Separation of concerns**: HTTP handling (async) is separate from inference (blocking)
+2. **Resource efficiency**: Single model instance shared across requests
+3. **Zero-copy**: Unified memory architecture minimizes data transfers
+4. **Lazy evaluation**: MLX automatically optimizes compute graphs
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="OminiX-API server" icon="server" href="/api/ominix-api">
+    Explore the unified API server implementation
+  </Card>
+  
+  <Card title="API endpoints" icon="code" href="/api/endpoints">
+    View complete endpoint reference with examples
+  </Card>
+</CardGroup>

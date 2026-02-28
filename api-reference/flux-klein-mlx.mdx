@@ -1,0 +1,380 @@
+---
+title: flux-klein-mlx
+description: FLUX.2-klein image generation API for Apple Silicon using MLX
+---
+
+## Overview
+
+FLUX.2-klein is a 4B parameter image generation model optimized for Apple Silicon. This crate provides the Rust implementation using MLX bindings.
+
+### Key features
+
+- **FLUX.2-klein transformer**: 4B parameter model with 5 double-stream and 20 single-stream blocks
+- **Qwen3-4B text encoder**: Shared with Z-Image-Turbo, produces 7680-dim embeddings
+- **VAE decoder**: AutoencoderKL for latent-to-image decoding
+- **4-bit quantization**: Memory-efficient inference (~3GB vs ~8GB)
+- **Rectified flow sampling**: Fast 4-step generation
+
+## Core types
+
+### FluxKlein
+
+The main transformer model for FLUX.2-klein.
+
+```rust
+pub struct FluxKlein {
+    pub params: FluxKleinParams,
+    // ... internal layers
+}
+```
+
+<ParamField path="params" type="FluxKleinParams">
+  Model configuration parameters
+</ParamField>
+
+#### Methods
+
+<ResponseField name="new" type="fn(params: FluxKleinParams) -> Result<Self, Exception>">
+  Create a new FLUX.2-klein transformer with the given parameters.
+  
+  <ParamField path="params" type="FluxKleinParams">
+    Model configuration. Use `FluxKleinParams::default()` for standard 4B model.
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="forward" type="fn(&mut self, img: &Array, txt: &Array, timesteps: &Array, img_ids: &Array, txt_ids: &Array) -> Result<Array, Exception>">
+  Run forward pass through the transformer.
+  
+  <ParamField path="img" type="&Array">
+    Image latents `[batch, seq, in_channels]` where `in_channels=128` (after patchify)
+  </ParamField>
+  
+  <ParamField path="txt" type="&Array">
+    Text embeddings `[batch, seq, 7680]` from Qwen3TextEncoder
+  </ParamField>
+  
+  <ParamField path="timesteps" type="&Array">
+    Denoising timesteps `[batch]` from 0.0 to 1.0
+  </ParamField>
+  
+  <ParamField path="img_ids" type="&Array">
+    Image position IDs `[batch, img_seq, 3]` for 3-axis RoPE
+  </ParamField>
+  
+  <ParamField path="txt_ids" type="&Array">
+    Text position IDs `[batch, txt_seq, 3]` for 3-axis RoPE
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Predicted velocity `[batch, img_seq, in_channels]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="forward_with_rope" type="fn(&mut self, img: &Array, txt: &Array, timesteps: &Array, rope_cos: &Array, rope_sin: &Array) -> Result<Array, Exception>">
+  Forward pass with pre-computed RoPE frequencies (faster for denoising loops).
+  
+  <ParamField path="rope_cos" type="&Array">
+    Pre-computed cosine frequencies from `compute_rope()`
+  </ParamField>
+  
+  <ParamField path="rope_sin" type="&Array">
+    Pre-computed sine frequencies from `compute_rope()`
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="compute_rope" type="fn(txt_ids: &Array, img_ids: &Array) -> Result<(Array, Array), Exception>">
+  Pre-compute RoPE frequencies for caching. Call once before denoising loop.
+  
+  <ResponseField name="returns" type="(Array, Array)">
+    Tuple of `(cos, sin)` frequencies for efficient reuse
+  </ResponseField>
+</ResponseField>
+
+### FluxKleinParams
+
+Configuration parameters for FLUX.2-klein.
+
+```rust
+pub struct FluxKleinParams {
+    pub in_channels: i32,      // 128 (after patchify)
+    pub hidden_size: i32,      // 3072
+    pub txt_embed_dim: i32,    // 7680 (from Qwen3)
+    pub num_heads: i32,        // 24
+    pub mlp_ratio: f32,        // 3.0
+    pub depth: i32,            // 5 double stream blocks
+    pub depth_single: i32,     // 20 single stream blocks
+    pub head_dim: i32,         // 128
+    pub mlp_hidden: i32,       // 9216 (3072 * 3)
+}
+```
+
+<ParamField path="in_channels" type="i32" default="128">
+  Input channels after patchify (32 VAE channels × 2×2 patch)
+</ParamField>
+
+<ParamField path="hidden_size" type="i32" default="3072">
+  Model dimension
+</ParamField>
+
+<ParamField path="txt_embed_dim" type="i32" default="7680">
+  Text embedding dimension from Qwen3-4B
+</ParamField>
+
+<ParamField path="depth" type="i32" default="5">
+  Number of double-stream transformer blocks
+</ParamField>
+
+<ParamField path="depth_single" type="i32" default="20">
+  Number of single-stream transformer blocks
+</ParamField>
+
+### Qwen3TextEncoder
+
+Text encoder using Qwen3-4B model.
+
+```rust
+pub struct Qwen3TextEncoder {
+    pub config: Qwen3Config,
+    // ... internal layers
+}
+```
+
+<ResponseField name="new" type="fn(config: Qwen3Config) -> Result<Self, Exception>">
+  Create a new Qwen3 text encoder.
+  
+  <ParamField path="config" type="Qwen3Config">
+    Model configuration. Use `Qwen3Config::default()` for Qwen3-4B.
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="forward" type="fn(&mut self, input_ids: &Array, attention_mask: Option<&Array>) -> Result<Array, Exception>">
+  Encode text tokens to embeddings.
+  
+  <ParamField path="input_ids" type="&Array">
+    Token IDs `[batch, seq_len]`
+  </ParamField>
+  
+  <ParamField path="attention_mask" type="Option<&Array>">
+    Optional attention mask `[batch, seq_len]` where 1 = real token, 0 = padding
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Text embeddings `[batch, seq_len, 7680]` (concatenated layers 8, 17, 26)
+  </ResponseField>
+</ResponseField>
+
+### Decoder (VAE)
+
+VAE decoder for converting latents to images.
+
+```rust
+pub struct Decoder {
+    pub config: AutoEncoderConfig,
+    // ... internal layers
+}
+```
+
+<ResponseField name="new" type="fn(config: AutoEncoderConfig) -> Result<Self, Exception>">
+  Create a new VAE decoder.
+  
+  <ParamField path="config" type="AutoEncoderConfig">
+    VAE configuration. Use `AutoEncoderConfig::flux2()` for FLUX.2.
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="forward" type="fn(&mut self, z: &Array) -> Result<Array, Exception>">
+  Decode latents to images.
+  
+  <ParamField path="z" type="&Array">
+    Latent array `[batch, height, width, channels]` in NHWC format
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Decoded images `[batch, height*8, width*8, 3]` (RGB, NHWC format)
+  </ResponseField>
+</ResponseField>
+
+## Sampling
+
+### FluxSampler
+
+Rectified flow sampler for denoising.
+
+```rust
+pub struct FluxSampler {
+    pub config: FluxSamplerConfig,
+}
+```
+
+<ResponseField name="new" type="fn(config: FluxSamplerConfig) -> Result<Self, Exception>">
+  Create a new sampler.
+  
+  <ParamField path="config" type="FluxSamplerConfig">
+    Sampler configuration
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="schnell" type="fn() -> Self">
+  Create sampler for fast 4-step generation (FLUX.2-klein default).
+</ResponseField>
+
+<ResponseField name="timesteps" type="fn(&self, num_steps: Option<i32>) -> Result<Vec<f32>, Exception>">
+  Generate timestep schedule from 1.0 to 0.0.
+  
+  <ParamField path="num_steps" type="Option<i32>">
+    Number of steps (defaults to config value)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Vec<f32>">
+    Timestep values from 1.0 (pure noise) to 0.0 (clean)
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="step" type="fn(&self, x_t: &Array, v_pred: &Array, t: f32, t_prev: f32) -> Result<Array, Exception>">
+  Single denoising step using rectified flow.
+  
+  <ParamField path="x_t" type="&Array">
+    Current noisy sample
+  </ParamField>
+  
+  <ParamField path="v_pred" type="&Array">
+    Model velocity prediction
+  </ParamField>
+  
+  <ParamField path="t" type="f32">
+    Current timestep
+  </ParamField>
+  
+  <ParamField path="t_prev" type="f32">
+    Target timestep
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Updated sample `x_{t-1} = x_t + (t_prev - t) * v_pred`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="sample_prior" type="fn(&self, shape: &[i32]) -> Result<Array, Exception>">
+  Sample initial noise from standard Gaussian.
+  
+  <ParamField path="shape" type="&[i32]">
+    Latent tensor shape `[batch, seq, channels]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Random Gaussian noise
+  </ResponseField>
+</ResponseField>
+
+### FluxSamplerConfig
+
+Sampler configuration.
+
+```rust
+pub struct FluxSamplerConfig {
+    pub num_steps: i32,
+    pub is_schnell: bool,
+    pub shift: f32,
+}
+```
+
+<ParamField path="num_steps" type="i32" default="4">
+  Number of inference steps
+</ParamField>
+
+<ParamField path="is_schnell" type="bool" default="true">
+  Whether to use fast linear schedule (true for FLUX.2-klein)
+</ParamField>
+
+<ParamField path="shift" type="f32" default="1.0">
+  Time shift parameter for non-schnell models
+</ParamField>
+
+<ResponseField name="klein" type="fn() -> Self">
+  Create config for FLUX.2-klein (4 steps, linear schedule).
+</ResponseField>
+
+## Quantization
+
+### QuantizedFluxKlein
+
+4-bit quantized FLUX.2-klein model for reduced memory usage.
+
+<ResponseField name="load_quantized_flux_klein" type="fn(weights: HashMap<String, Array>, params: FluxKleinParams) -> Result<QuantizedFluxKlein, Exception>">
+  Load 4-bit quantized model from pre-quantized weights.
+  
+  <ParamField path="weights" type="HashMap<String, Array>">
+    Pre-quantized model weights
+  </ParamField>
+  
+  <ParamField path="params" type="FluxKleinParams">
+    Model configuration
+  </ParamField>
+  
+  <ResponseField name="returns" type="QuantizedFluxKlein">
+    4-bit quantized model (~3GB memory)
+  </ResponseField>
+</ResponseField>
+
+## Weight utilities
+
+<ResponseField name="load_safetensors" type="fn(path: &Path) -> Result<HashMap<String, Array>, Exception>">
+  Load weights from safetensors file.
+  
+  <ParamField path="path" type="&Path">
+    Path to .safetensors file
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="sanitize_flux2_klein_weights" type="fn(weights: HashMap<String, Array>) -> HashMap<String, Array>">
+  Sanitize FLUX.2-klein weights from HuggingFace format to Rust format.
+  
+  <ParamField path="weights" type="HashMap<String, Array>">
+    Raw weights from HuggingFace
+  </ParamField>
+  
+  <ResponseField name="returns" type="HashMap<String, Array>">
+    Sanitized weights ready to load
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="sanitize_qwen3_weights" type="fn(weights: HashMap<String, Array>) -> HashMap<String, Array>">
+  Sanitize Qwen3 text encoder weights.
+</ResponseField>
+
+<ResponseField name="sanitize_vae_weights" type="fn(weights: HashMap<String, Array>) -> HashMap<String, Array>">
+  Sanitize VAE decoder weights from HuggingFace format.
+</ResponseField>
+
+## Example usage
+
+```rust
+use flux_klein_mlx::{FluxKlein, Qwen3TextEncoder, Decoder};
+use flux_klein_mlx::{FluxSampler, FluxKleinParams, Qwen3Config, AutoEncoderConfig};
+
+// Load models
+let text_encoder = Qwen3TextEncoder::new(Qwen3Config::default())?;
+let transformer = FluxKlein::new(FluxKleinParams::default())?;
+let vae = Decoder::new(AutoEncoderConfig::flux2())?;
+
+// Create sampler
+let sampler = FluxSampler::schnell(); // 4-step generation
+
+// Encode text
+let text_embed = text_encoder.forward(&input_ids, None)?;
+
+// Generate image
+let latents = sampler.sample_prior(&[1, 1024, 128])?;
+let (rope_cos, rope_sin) = FluxKlein::compute_rope(&txt_ids, &img_ids)?;
+
+for (t_curr, t_next) in sampler.timesteps(None)?.windows(2) {
+    let t = Array::from_slice(&[t_curr], &[1]);
+    let v_pred = transformer.forward_with_rope(
+        &latents, &text_embed, &t, &rope_cos, &rope_sin
+    )?;
+    latents = sampler.step(&latents, &v_pred, t_curr, t_next)?;
+}
+
+// Decode to image
+let image = vae.forward(&latents)?;
+```

@@ -1,0 +1,297 @@
+---
+title: FLUX.2-klein
+description: Fast 4-step image generation with 4B parameter transformer
+---
+
+FLUX.2-klein is a compact diffusion model optimized for fast generation. With only 4 denoising steps and optional INT8 quantization, it provides excellent speed-quality balance for Apple Silicon.
+
+## Features
+
+- **4B parameter transformer**: 5 double blocks + 20 single blocks
+- **Qwen3-4B text encoder**: 36 layers, 2560 hidden dimensions
+- **4-step generation**: Rectified flow with SNR-shifted schedule
+- **INT8 quantization**: Optional memory reduction (13GB → 8GB)
+- **AutoencoderKL VAE**: 32 latent channels for high-quality decoding
+
+## Installation
+
+The model downloads automatically from HuggingFace (gated model - requires authentication).
+
+<Steps>
+  <Step title="Login to HuggingFace">
+    ```bash
+    # Login to HuggingFace
+    huggingface-cli login
+    
+    # Or set token via environment
+    export HF_TOKEN=your_token_here
+    ```
+  </Step>
+
+  <Step title="Run generation">
+    The model will download automatically on first run:
+    ```bash
+    cargo run --example generate_klein --release -- "a beautiful sunset"
+    ```
+  </Step>
+</Steps>
+
+### Manual download
+
+For offline use or custom model paths:
+
+```bash
+# Download with huggingface-cli
+huggingface-cli download black-forest-labs/FLUX.2-klein-4B --local-dir ./models/flux
+
+# Or use git lfs
+git lfs install
+git clone https://huggingface.co/black-forest-labs/FLUX.2-klein-4B ./models/flux
+
+# Set custom path
+export FLUX_MODEL_DIR=./models/flux
+```
+
+## Usage
+
+### Command line
+
+<CodeGroup>
+```bash Basic generation
+# Default: 512x512, 4 steps, FP32
+cargo run --example generate_klein --release -- "a cat sitting on a windowsill"
+```
+
+```bash With quantization
+# Reduce memory from ~13GB to ~8GB
+cargo run --example generate_klein --release -- --quantize "a majestic lion"
+```
+
+```bash Custom steps
+# Use more steps for higher quality
+cargo run --example generate_klein --release -- --steps 8 "detailed portrait"
+```
+</CodeGroup>
+
+### Library usage
+
+```rust
+use flux_klein_mlx::{
+    FluxKlein, FluxKleinParams,
+    Qwen3TextEncoder, Qwen3Config,
+    Decoder, AutoEncoderConfig,
+    load_safetensors,
+};
+use mlx_rs::Array;
+use std::collections::HashMap;
+
+// Load text encoder
+let qwen3_config = Qwen3Config {
+    hidden_size: 2560,
+    num_hidden_layers: 36,
+    intermediate_size: 9728,
+    num_attention_heads: 32,
+    num_key_value_heads: 8,
+    rms_norm_eps: 1e-6,
+    vocab_size: 151936,
+    max_position_embeddings: 40960,
+    rope_theta: 1000000.0,
+    head_dim: 128,
+};
+let mut text_encoder = Qwen3TextEncoder::new(qwen3_config)?;
+
+// Load transformer
+let params = FluxKleinParams::default();
+let mut transformer = FluxKlein::new(params)?;
+
+// Load VAE decoder
+let vae_config = AutoEncoderConfig::flux2();
+let mut vae = Decoder::new(vae_config)?;
+
+// Load weights from safetensors
+// ... (see full example for weight loading)
+
+// Encode text prompt
+let txt_embed = text_encoder.encode(&input_ids, Some(&attention_mask))?;
+
+// Generate latents with denoising
+let (rope_cos, rope_sin) = FluxKlein::compute_rope(&txt_ids, &img_ids)?;
+let latent = transformer.forward_with_rope(
+    &noise, &txt_embed, &timestep, &rope_cos, &rope_sin
+)?;
+
+// Decode to image
+let image = vae.forward(&latent)?;
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    FLUX.2-klein Pipeline                     │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────┐    ┌──────────────────┐    ┌───────────┐  │
+│  │   Qwen3-4B  │    │  FLUX Transformer │    │    VAE    │  │
+│  │   Encoder   │───▶│  5 double blocks  │───▶│  Decoder  │  │
+│  │  36 layers  │    │ 20 single blocks  │    │  32 ch    │  │
+│  └─────────────┘    └──────────────────┘    └───────────┘  │
+│        │                    │                      │        │
+│    [B,512,2560]        [B,1024,128]          [B,H,W,3]     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key components
+
+**Text encoder (Qwen3-4B)**
+- 36 transformer layers with RMSNorm
+- 2560 hidden dimensions
+- Grouped query attention (32 heads, 8 KV heads)
+- RoPE position embeddings (θ=1,000,000)
+- Outputs: [batch, 512, 2560]
+
+**Transformer (FLUX.2-klein)**
+- 5 double blocks: Joint image-text attention
+- 20 single blocks: Image-only processing
+- 4-axis RoPE: [32, 32, 32, 32] for (T, H1, H2, W)
+- Patch size: 2x2 on latent space
+- Input channels: 128 (32 VAE channels × 2×2 patch)
+
+**VAE decoder**
+- 32 latent channels (FLUX.2 uses more than FLUX.1)
+- 8× upsampling: 64×64 → 512×512
+- Outputs RGB images in [-1, 1] range
+
+### Denoising schedule
+
+FLUX.2-klein uses a SNR-shifted rectified flow schedule:
+
+```rust
+// Compute empirical mu based on sequence length
+let mu = compute_empirical_mu(image_seq_len, num_steps);
+
+// Apply SNR shift
+fn time_shift(t: f32, mu: f32, sigma: f32) -> f32 {
+    mu.exp() / (mu.exp() + (1.0/t - 1.0).powf(sigma))
+}
+
+// Generate timesteps
+for i in 0..=num_steps {
+    let t_linear = 1.0 - (i as f32) / (num_steps as f32);
+    let t_shifted = time_shift(t_linear, mu, 1.0);
+    timesteps.push(t_shifted);
+}
+
+// Euler integration
+for step in 0..num_steps {
+    let v_pred = transformer.forward(...);
+    let dt = timesteps[step + 1] - timesteps[step];
+    latent = latent + dt * v_pred;  // Euler step
+}
+```
+
+## Performance
+
+On Apple M3 Max (128GB):
+
+| Mode | Memory | Time (512×512) | Quality |
+|------|--------|----------------|----------|
+| FP32 | ~13GB | ~5s | Excellent |
+| INT8 | ~8GB | ~6s | Very good |
+
+### Performance tips
+
+<Note>
+  INT8 quantization provides excellent quality with minimal degradation while reducing memory by ~40%.
+</Note>
+
+- Use `--quantize` for lower memory usage
+- Increase steps to 8 for higher quality
+- Default 4 steps work well for most use cases
+- Quantization adds ~1s overhead but saves 5GB RAM
+
+## Configuration
+
+### Environment variables
+
+```bash
+# Custom model directory
+export FLUX_MODEL_DIR=/path/to/flux-model
+
+# HuggingFace token (for gated model)
+export HF_TOKEN=your_token_here
+
+# Run with custom path
+FLUX_MODEL_DIR=./models/flux cargo run --example generate_klein --release
+```
+
+### Model files structure
+
+```
+models/flux/
+├── transformer/
+│   └── diffusion_pytorch_model.safetensors  # ~8GB
+├── text_encoder/
+│   ├── model-00001-of-00002.safetensors     # ~5GB
+│   └── model-00002-of-00002.safetensors     # ~5GB
+├── vae/
+│   └── diffusion_pytorch_model.safetensors  # ~160MB
+└── tokenizer/
+    └── tokenizer.json
+```
+
+## Examples
+
+### Basic generation
+
+```bash
+cargo run --example generate_klein --release -- \
+  "a beautiful sunset over the ocean"
+```
+
+### High-quality generation
+
+```bash
+cargo run --example generate_klein --release -- \
+  --steps 8 \
+  "detailed portrait of a knight in shining armor"
+```
+
+### Memory-efficient generation
+
+```bash
+cargo run --example generate_klein --release -- \
+  --quantize \
+  "a cat sitting on a windowsill, warm lighting"
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Model download fails">
+    FLUX.2-klein is a gated model. Make sure you:
+    1. Accept the license on HuggingFace
+    2. Login with `huggingface-cli login`
+    3. Or set `HF_TOKEN` environment variable
+  </Accordion>
+
+  <Accordion title="Out of memory">
+    Try these solutions:
+    - Use `--quantize` flag to enable INT8 quantization
+    - Close other applications
+    - Ensure you have at least 16GB unified memory
+  </Accordion>
+
+  <Accordion title="Generation is slow">
+    - Use `--release` flag when building
+    - Reduce steps to 4 (default)
+    - First run includes model download and compilation
+  </Accordion>
+</AccordionGroup>
+
+## Resources
+
+- [HuggingFace Model](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
+- [Original FLUX.1](https://huggingface.co/black-forest-labs/FLUX.1-schnell)
+- [ModelScope Mirror](https://modelscope.cn/models/black-forest-labs/FLUX.2-klein-4B)

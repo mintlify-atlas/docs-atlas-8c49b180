@@ -1,0 +1,130 @@
+---
+title: Image generation overview
+description: Generate high-quality images on Apple Silicon using MLX-based diffusion models
+---
+
+The image generation suite provides three state-of-the-art diffusion models optimized for Apple Silicon, each offering different trade-offs between speed, quality, and memory usage.
+
+## Available models
+
+<CardGroup cols={3}>
+  <Card title="FLUX.2-klein" icon="bolt" href="/image/flux-klein">
+    4B parameter model with 4-step generation. Fast inference with INT8 quantization support.
+  </Card>
+  <Card title="Z-Image-Turbo" icon="rocket" href="/image/zimage">
+    6B parameter Single-Stream DiT. 9-step turbo inference with 4-bit quantization for minimal memory.
+  </Card>
+  <Card title="Qwen-Image" icon="stars" href="/image/qwen-image">
+    High-quality text-to-image with classifier-free guidance. Available in BF16, 8-bit, and 4-bit variants.
+  </Card>
+</CardGroup>
+
+## Model comparison
+
+| Feature | FLUX.2-klein | Z-Image-Turbo | Qwen-Image |
+|---------|--------------|---------------|------------|
+| Parameters | 4B | 6B | Large |
+| Steps | 4 | 9 | 20-50 |
+| Architecture | Double + Single blocks | S3-DiT | MM-DiT |
+| Text encoder | Qwen3-4B | Qwen3-4B (layer 34) | Qwen-VL |
+| Quantization | INT8 (~8GB) | 4-bit (~3GB) | 4-bit (~26GB) |
+| Speed (512x512) | ~5s | ~3s | ~15-30s |
+| Best for | Fast generation | Memory efficiency | Highest quality |
+
+## Common features
+
+All models share these capabilities:
+
+- **Apple Silicon optimized**: Native MLX backend for M-series chips
+- **Quantization support**: Reduce memory usage with minimal quality loss
+- **Rectified flow**: Modern denoising schedule for efficient sampling
+- **Rotary embeddings (RoPE)**: Advanced position encoding
+- **AutoencoderKL VAE**: High-quality latent decoding
+
+## Quick start
+
+<Steps>
+  <Step title="Choose your model">
+    Select based on your needs:
+    - **FLUX.2-klein**: Fastest generation, good for iteration
+    - **Z-Image-Turbo**: Best memory efficiency, still very fast
+    - **Qwen-Image**: Highest quality, flexible resolution
+  </Step>
+
+  <Step title="Download weights">
+    Models download automatically from HuggingFace on first run. See individual model pages for manual download instructions.
+  </Step>
+
+  <Step title="Generate your first image">
+    ```bash
+    # FLUX.2-klein
+    cargo run --example generate_klein --release -- "a cat on a windowsill"
+    
+    # Z-Image-Turbo
+    cargo run --example generate_zimage_quantized --release -- "a cat on a windowsill"
+    
+    # Qwen-Image
+    cargo run --example generate_qwen_image --release -- -p "a cat on a windowsill"
+    ```
+  </Step>
+</Steps>
+
+## Architecture overview
+
+All three models follow the latent diffusion pipeline:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                 Latent Diffusion Pipeline                 │
+├──────────────────────────────────────────────────────────┤
+│                                                           │
+│  ┌──────────────┐    ┌─────────────┐    ┌────────────┐  │
+│  │ Text Encoder │───▶│ Transformer │───▶│    VAE     │  │
+│  │ (Qwen/Qwen3) │    │   (DiT)     │    │  Decoder   │  │
+│  └──────────────┘    └─────────────┘    └────────────┘  │
+│         │                   │                   │        │
+│     [B,L,D]          [B,N,hidden]          [B,H,W,3]     │
+│                                                           │
+└──────────────────────────────────────────────────────────┘
+```
+
+1. **Text encoding**: Prompt → embeddings via Qwen3 or Qwen-VL
+2. **Denoising**: Noise → latents via transformer with timestep conditioning
+3. **Decoding**: Latents → RGB image via VAE decoder
+
+## Performance tips
+
+<Note>
+  All performance numbers are from Apple M3 Max with 128GB RAM.
+</Note>
+
+### Memory optimization
+
+- Use quantization when memory is limited
+- FLUX.2-klein INT8: 13GB → 8GB
+- Z-Image 4-bit: 12GB → 3GB
+- Qwen-Image 4-bit: 57GB → 26GB
+
+### Speed optimization
+
+- Reduce inference steps (quality vs speed trade-off)
+- Use smaller resolutions for iteration
+- Z-Image-Turbo is fastest for production
+- FLUX.2-klein best for rapid prototyping
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="FLUX.2-klein guide" icon="book" href="/image/flux-klein">
+    Learn about the 4-step fast generation model
+  </Card>
+  <Card title="Z-Image guide" icon="book" href="/image/zimage">
+    Explore the memory-efficient turbo model
+  </Card>
+  <Card title="Qwen-Image guide" icon="book" href="/image/qwen-image">
+    Master high-quality image generation
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Browse the complete API documentation
+  </Card>
+</CardGroup>

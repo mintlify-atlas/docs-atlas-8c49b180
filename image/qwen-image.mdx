@@ -1,0 +1,473 @@
+---
+title: Qwen-Image
+description: High-quality text-to-image generation with classifier-free guidance
+---
+
+Qwen-Image is a large-scale text-to-image diffusion model offering the highest quality output. With flexible resolution support and classifier-free guidance, it excels at detailed, high-fidelity image generation.
+
+## Features
+
+- **Large-scale transformer**: MM-DiT architecture with text-image joint attention
+- **Flexible resolution**: Support for custom width and height (must be divisible by 16)
+- **Classifier-free guidance**: CFG scale control for prompt adherence
+- **Multiple quantization levels**: BF16 (57.7GB), 8-bit (36.1GB), 4-bit (25.9GB)
+- **Qwen-VL text encoder**: Advanced multimodal text encoding
+- **3-axis RoPE**: Sophisticated position encoding [16, 56, 56]
+
+## Installation
+
+Models are stored in `~/.dora/models/` by default. Use `DORA_MODELS_PATH` to customize.
+
+<Steps>
+  <Step title="Choose quantization level">
+    Select based on available memory:
+    - **4-bit**: 25.9GB (recommended for most users)
+    - **8-bit**: 36.1GB (better quality, more memory)
+    - **BF16**: 57.7GB (best quality, requires 64GB+ RAM)
+  </Step>
+
+  <Step title="Download model">
+    ```bash
+    # 4-bit quantized (recommended)
+    huggingface-cli download mlx-community/Qwen-Image-2512-4bit \
+      --local-dir ~/.dora/models/qwen-image-2512-4bit
+    
+    # 8-bit quantized
+    huggingface-cli download mlx-community/Qwen-Image-2512-8bit \
+      --local-dir ~/.dora/models/qwen-image-2512-8bit
+    
+    # Full precision
+    huggingface-cli download Qwen/Qwen-Image-2512 \
+      --local-dir ~/.dora/models/qwen-image-2512
+    ```
+  </Step>
+
+  <Step title="Run generation">
+    ```bash
+    # 4-bit (default)
+    cargo run --release --example generate_qwen_image -- -p "a fluffy cat"
+    
+    # 8-bit
+    cargo run --release --example generate_qwen_image -- --use-8bit -p "a fluffy cat"
+    
+    # Full precision
+    cargo run --release --example generate_fp32 -- -p "a fluffy cat"
+    ```
+  </Step>
+</Steps>
+
+## Usage
+
+### Command line options
+
+```bash
+cargo run --release --example generate_qwen_image -- \
+  -p "a majestic lion in the savanna at sunset" \
+  -o lion.png \
+  -W 1024 -H 1024 \
+  -s 30 \
+  -g 5.0 \
+  --seed 42
+```
+
+<ParamField path="-p, --prompt" type="string" required>
+  Text prompt for image generation
+</ParamField>
+
+<ParamField path="-o, --output" type="string" default="output.png">
+  Output image path
+</ParamField>
+
+<ParamField path="-W, --width" type="int" default="1024">
+  Image width (must be divisible by 16)
+</ParamField>
+
+<ParamField path="-H, --height" type="int" default="1024">
+  Image height (must be divisible by 16)
+</ParamField>
+
+<ParamField path="-s, --steps" type="int" default="20">
+  Number of diffusion steps (20-50 recommended)
+</ParamField>
+
+<ParamField path="-g, --guidance" type="float" default="4.0">
+  Classifier-free guidance scale (higher = more prompt adherence)
+</ParamField>
+
+<ParamField path="--seed" type="int">
+  Random seed for reproducibility
+</ParamField>
+
+<ParamField path="--use-8bit" type="boolean">
+  Use 8-bit quantization (requires 8-bit model)
+</ParamField>
+
+### Library usage
+
+```rust
+use qwen_image_mlx::{
+    QwenQuantizedTransformer, QwenConfig,
+    load_transformer_weights,
+    load_text_encoder,
+    load_vae_from_dir,
+    QwenVAE,
+};
+use mlx_rs::Array;
+
+// Load 4-bit quantized transformer
+let config = QwenConfig::default();  // 4-bit
+let transformer_weights = load_sharded_weights(&transformer_files)?;
+let mut transformer = QwenQuantizedTransformer::new(config)?;
+load_transformer_weights(&mut transformer, transformer_weights)?;
+
+// Load text encoder
+let mut text_encoder = load_text_encoder(&model_dir)?;
+
+// Encode prompts with Qwen-VL template
+let template = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n";
+let formatted_prompt = template.replace("{}", &prompt);
+
+let cond_states = text_encoder.forward_with_mask(&cond_input_ids, &cond_attn_mask)?;
+let uncond_states = text_encoder.forward_with_mask(&uncond_input_ids, &uncond_attn_mask)?;
+
+// Generate RoPE embeddings with scale_rope=True
+let theta = 10000.0f32;
+let axes_dim = [16i32, 56i32, 56i32];  // frame, height, width
+// ... (see full example for RoPE computation)
+
+// Initialize latents
+let key = mlx_rs::random::key(seed)?;
+let mut latents = mlx_rs::random::normal::<f32>(
+    &[1, num_patches, 64], None, None, Some(&key)
+)?;
+
+// Denoising with CFG
+for step in 0..num_steps {
+    let timestep = Array::from_slice(&[sigmas[step]], &[1]);
+    
+    // Get predictions
+    let cond_velocity = transformer.forward(
+        &latents, &cond_states, &timestep,
+        Some((&img_cos, &img_sin)),
+        Some((&cond_txt_cos, &cond_txt_sin)),
+        None,
+    )?;
+    
+    let uncond_velocity = transformer.forward(
+        &latents, &uncond_states, &timestep,
+        Some((&img_cos, &img_sin)),
+        Some((&uncond_txt_cos, &uncond_txt_sin)),
+        None,
+    )?;
+    
+    // Apply normalized CFG
+    let velocity_diff = cond_velocity - uncond_velocity;
+    let combined = uncond_velocity + cfg_scale * velocity_diff;
+    
+    // Rescale to match conditional norm
+    let cond_norm = sqrt(sum(cond_velocity^2, axis=-1) + eps);
+    let combined_norm = sqrt(sum(combined^2, axis=-1) + eps);
+    let velocity = combined * (cond_norm / combined_norm);
+    
+    // Euler step
+    let dt = sigmas[step + 1] - sigmas[step];
+    latents = latents + dt * velocity;
+}
+
+// Unpatchify and decode
+let vae_latents = unpatchify(latents)?;
+let denorm_latents = QwenVAE::denormalize_latent(&vae_latents)?;
+let image = vae.decode(&denorm_latents)?;
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Qwen-Image Pipeline                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────┐    ┌──────────────────┐    ┌───────────┐  │
+│  │  Qwen-VL    │    │   MM-DiT         │    │    VAE    │  │
+│  │  Encoder    │───▶│   Joint Attn     │───▶│  Decoder  │  │
+│  │  + Template │    │   Text-Image     │    │  16 ch    │  │
+│  └─────────────┘    └──────────────────┘    └───────────┘  │
+│        │                    │                      │        │
+│    [B,77,3584]         [B,N,hidden]          [B,H,W,3]     │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key components
+
+**Text encoder (Qwen-VL)**
+- Multimodal architecture (shared with Qwen-VL)
+- Template-based prompting with system message
+- Outputs 3584-dimensional embeddings
+- Causal attention with padding mask
+- Template adds 34 tokens (dropped after encoding)
+
+**Transformer (MM-DiT)**
+- Multimodal Diffusion Transformer
+- Joint text-image attention blocks
+- Quantized linear layers (4-bit or 8-bit)
+- 3-axis RoPE with scale_rope=True (centered positions)
+- Dynamic flow matching schedule
+
+**VAE decoder**
+- 16 latent channels
+- 16× upsampling total
+- Patch size: 2×2
+- 3D convolutions for temporal consistency
+
+### RoPE with scale_rope
+
+Qwen-Image uses centered position encoding:
+
+```rust
+// 3-axis RoPE: [16, 56, 56] for (frame, height, width)
+let theta = 10000.0f32;
+let axes_dim = [16i32, 56i32, 56i32];
+
+// With scale_rope=True, positions are CENTERED
+// Frame: always positive [0, 1, 2, ...]
+// Height/Width: centered [-h/2, ..., -1, 0, 1, ..., h/2-1]
+
+let half_height = latent_h / 2;
+let half_width = latent_w / 2;
+
+for h in 0..latent_h {
+    for w in 0..latent_w {
+        // Centered positions
+        let h_pos = if h < half_height {
+            -(half_height - h)  // Negative for first half
+        } else {
+            h - half_height     // Positive for second half
+        };
+        
+        let w_pos = if w < half_width {
+            -(half_width - w)
+        } else {
+            w - half_width
+        };
+        
+        // Text positions start after max image position
+        let max_vid_index = half_height.max(half_width);
+    }
+}
+```
+
+### Classifier-free guidance
+
+Qwen-Image uses normalized CFG for better quality:
+
+```rust
+// Standard CFG
+let combined = uncond + cfg_scale * (cond - uncond);
+
+// Normalized CFG (maintains magnitude)
+let cond_norm = sqrt(sum(cond^2, -1) + eps);
+let combined_norm = sqrt(sum(combined^2, -1) + eps);
+let velocity = combined * (cond_norm / combined_norm);
+```
+
+## Performance
+
+On Apple M3 Max (128GB):
+
+| Variant | Memory | Time (1024×1024, 20 steps) | Quality |
+|---------|--------|---------------------------|----------|
+| 4-bit | ~26GB | ~20-25s | Very good |
+| 8-bit | ~36GB | ~18-22s | Excellent |
+| BF16 | ~58GB | ~15-20s | Best |
+
+### Guidance scale recommendations
+
+| CFG Scale | Effect |
+|-----------|--------|
+| 1.0 | Unconditional (no prompt guidance) |
+| 2.0-3.0 | Subtle prompt following |
+| 4.0-5.0 | Balanced (recommended) |
+| 6.0-8.0 | Strong prompt adherence |
+| 9.0+ | Very strict (may reduce quality) |
+
+<Note>
+  Higher guidance scales increase prompt adherence but may reduce image diversity and introduce artifacts.
+</Note>
+
+## Configuration
+
+### Environment variables
+
+```bash
+# Custom model directory
+export DORA_MODELS_PATH=/path/to/models
+
+# Models will be loaded from:
+# $DORA_MODELS_PATH/qwen-image-2512-4bit/
+# $DORA_MODELS_PATH/qwen-image-2512-8bit/
+# $DORA_MODELS_PATH/qwen-image-2512/
+```
+
+### Model directory structure
+
+```
+~/.dora/models/qwen-image-2512-4bit/
+├── transformer/
+│   ├── 0.safetensors      # Sharded quantized weights
+│   ├── 1.safetensors
+│   └── ...
+├── text_encoder/
+│   ├── model-00001-of-00002.safetensors
+│   └── model-00002-of-00002.safetensors
+├── vae/
+│   └── diffusion_pytorch_model.safetensors
+└── tokenizer/
+    └── tokenizer.json
+```
+
+## Examples
+
+### Basic generation
+
+```bash
+cargo run --release --example generate_qwen_image -- \
+  -p "a fluffy cat" \
+  -o cat.png
+```
+
+### High-resolution with strong guidance
+
+```bash
+cargo run --release --example generate_qwen_image -- \
+  -p "a majestic lion in the savanna at sunset, highly detailed" \
+  -W 1536 -H 1024 \
+  -s 30 \
+  -g 6.0 \
+  -o lion_sunset.png
+```
+
+### Reproducible generation
+
+```bash
+# Same seed produces identical images
+cargo run --release --example generate_qwen_image -- \
+  -p "a serene mountain landscape" \
+  --seed 42 \
+  -o mountain_v1.png
+
+# Different seed, different variation
+cargo run --release --example generate_qwen_image -- \
+  -p "a serene mountain landscape" \
+  --seed 123 \
+  -o mountain_v2.png
+```
+
+### Custom resolution
+
+```bash
+# Portrait (768x1024)
+cargo run --release --example generate_qwen_image -- \
+  -p "portrait of a woman" \
+  -W 768 -H 1024
+
+# Landscape (1536x768)
+cargo run --release --example generate_qwen_image -- \
+  -p "wide landscape view" \
+  -W 1536 -H 768
+
+# Square (1024x1024)
+cargo run --release --example generate_qwen_image -- \
+  -p "abstract art" \
+  -W 1024 -H 1024
+```
+
+## Advanced usage
+
+### Dynamic scheduler
+
+Qwen-Image uses resolution-adaptive scheduling:
+
+```rust
+// Calculate shift based on number of patches
+fn calculate_shift(image_seq_len: i32) -> f32 {
+    const BASE_SHIFT: f32 = 0.5;
+    const MAX_SHIFT: f32 = 0.9;
+    const BASE_SEQ: f32 = 256.0;
+    const MAX_SEQ: f32 = 8192.0;
+    
+    let m = (MAX_SHIFT - BASE_SHIFT) / (MAX_SEQ - BASE_SEQ);
+    let b = BASE_SHIFT - m * BASE_SEQ;
+    image_seq_len as f32 * m + b
+}
+
+// Exponential time shift
+fn time_shift(mu: f32, sigma: f32, t: f32) -> f32 {
+    let exp_mu = mu.exp();
+    exp_mu / (exp_mu + (1.0/t - 1.0).powf(sigma))
+}
+
+let mu = calculate_shift(num_patches);
+let sigmas: Vec<f32> = (0..=steps)
+    .map(|i| time_shift(mu, 1.0, 1.0 - i as f32 / steps as f32))
+    .collect();
+```
+
+### Memory optimization
+
+```rust
+// Use 4-bit config
+let config = QwenConfig::default();  // 4-bit by default
+
+// Or 8-bit
+let config = QwenConfig::with_8bit();
+
+// Quantized weights stay in memory as 4/8-bit
+// Only dequantized during forward pass
+// Significantly reduces memory bandwidth
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Model not found">
+    Ensure models are in the correct location:
+    ```bash
+    ls ~/.dora/models/qwen-image-2512-4bit/transformer/
+    # Should see: 0.safetensors, 1.safetensors, etc.
+    
+    # Or set custom path:
+    export DORA_MODELS_PATH=/path/to/models
+    ```
+  </Accordion>
+
+  <Accordion title="Out of memory">
+    - Use 4-bit instead of 8-bit or BF16
+    - Reduce resolution (try 512×512)
+    - Reduce number of steps
+    - Close other applications
+    - Requires at least 32GB for 4-bit variant
+  </Accordion>
+
+  <Accordion title="Poor image quality">
+    - Increase steps to 30-50
+    - Adjust guidance scale (try 5.0-6.0)
+    - Use more descriptive prompts
+    - Try different seeds
+    - Use 8-bit or BF16 for better quality
+  </Accordion>
+
+  <Accordion title="Width/height must be divisible by 16">
+    The VAE uses 16× downsampling:
+    - Valid: 512, 768, 1024, 1280, 1536
+    - Invalid: 500, 720, 1000
+    - Use multiples of 16 for custom sizes
+  </Accordion>
+</AccordionGroup>
+
+## Resources
+
+- [HuggingFace 4-bit Model](https://huggingface.co/mlx-community/Qwen-Image-2512-4bit)
+- [HuggingFace 8-bit Model](https://huggingface.co/mlx-community/Qwen-Image-2512-8bit)
+- [Original Qwen-Image](https://huggingface.co/Qwen/Qwen-Image-2512)
+- [Qwen-VL Documentation](https://github.com/QwenLM/Qwen-VL)

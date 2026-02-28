@@ -1,0 +1,268 @@
+---
+title: OminiX-API server
+description: Unified OpenAI-compatible API server for all OminiX-MLX models
+---
+
+## Overview
+
+OminiX-API is a unified HTTP server that provides OpenAI-compatible endpoints for all OminiX model types. It's designed as a single, extensible server that can handle LLM, VLM, ASR, TTS, and image generation models.
+
+<Note>
+  Currently, OminiX-API supports **ASR (Speech Recognition)** with Qwen3-ASR models. Support for LLM, VLM, and TTS is coming soon.
+</Note>
+
+## Installation
+
+### Build from source
+
+```bash
+cd OminiX-MLX
+cargo build --release -p ominix-api
+```
+
+### Features
+
+The server uses Cargo feature flags to include model support:
+
+| Feature | Description | Default |
+|---------|-------------|---------|
+| `asr` | Enable speech recognition endpoints | ✓ |
+| `llm` | Enable LLM chat endpoints | Coming soon |
+| `vlm` | Enable vision-language endpoints | Coming soon |
+| `tts` | Enable text-to-speech endpoints | Coming soon |
+
+Build with specific features:
+
+```bash
+cargo build --release -p ominix-api --features asr
+```
+
+## Quick start
+
+### Download an ASR model
+
+```bash
+huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+  --local-dir ~/.OminiX/models/qwen3-asr-1.7b
+```
+
+### Start the server
+
+```bash
+cargo run --release -p ominix-api -- \
+  --asr-model ~/.OminiX/models/qwen3-asr-1.7b \
+  --port 8080
+```
+
+### Test transcription
+
+<Tabs>
+  <Tab title="Multipart upload">
+    ```bash
+    curl http://localhost:8080/v1/audio/transcriptions \
+      -F file=@audio.wav \
+      -F language=English
+    ```
+  </Tab>
+  
+  <Tab title="JSON file path">
+    ```bash
+    curl http://localhost:8080/v1/audio/transcriptions \
+      -H "Content-Type: application/json" \
+      -d '{
+        "file_path": "audio.wav",
+        "language": "Chinese"
+      }'
+    ```
+  </Tab>
+</Tabs>
+
+## Configuration
+
+### Command-line options
+
+<ParamField path="--asr-model" type="string">
+  Path to ASR model directory. Required when using ASR features.
+  
+  Example: `~/.OminiX/models/qwen3-asr-1.7b`
+</ParamField>
+
+<ParamField path="--port" type="integer" default="8080">
+  HTTP server port
+</ParamField>
+
+<ParamField path="--models-dir" type="string" default="~/.ominix/models">
+  Directory for storing downloaded models
+</ParamField>
+
+### Environment variables
+
+<ParamField path="HF_TOKEN" type="string">
+  HuggingFace API token for downloading gated models. Can also be read from `~/.cache/huggingface/token`
+</ParamField>
+
+## Architecture
+
+### Technology stack
+
+| Component | Technology | Purpose |
+|-----------|------------|----------|
+| HTTP Server | Hyper 1.x | Async HTTP/1.1 server |
+| Runtime | Tokio | Async task execution |
+| Serialization | serde_json | JSON request/response |
+| Model Download | hf-hub | HuggingFace model fetching |
+| Audio Encoding | base64 | Binary audio handling |
+| CLI | clap | Argument parsing |
+
+### Crate structure
+
+```rust
+[dependencies]
+# HTTP server
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+# Model crates (feature-gated)
+qwen3-asr-mlx = { path = "../qwen3-asr-mlx", optional = true }
+```
+
+### Request handling flow
+
+1. **HTTP Request** → Hyper server receives request
+2. **Route Matching** → Path and method determine handler
+3. **Request Parsing** → JSON/multipart body deserialization
+4. **Inference** → Model processes input (ASR, LLM, etc.)
+5. **Response Formatting** → OpenAI-compatible JSON response
+6. **HTTP Response** → Hyper sends response with CORS headers
+
+## Model management
+
+### Configuration file
+
+OminiX-API maintains a configuration file at `~/.ominix/config.json`:
+
+```json
+{
+  "models_dir": "/Users/you/.ominix/models",
+  "models": [
+    {
+      "id": "qwen3-asr-1.7b",
+      "repo_id": "mlx-community/Qwen3-ASR-1.7B-8bit",
+      "path": "/Users/you/.ominix/models/qwen3-asr-1.7b",
+      "quantization": {
+        "bits": 8,
+        "group_size": 64
+      },
+      "size_bytes": 2460000000,
+      "downloaded_at": "1672531200"
+    }
+  ]
+}
+```
+
+### Automatic model scanning
+
+The server automatically scans the `models_dir` on startup and when listing models:
+
+- Detects new model directories with `config.json`
+- Removes entries for deleted models
+- Extracts quantization info from model config
+- Calculates model size from `.safetensors` files
+
+## Supported models
+
+### Speech recognition (ASR)
+
+| Model | Languages | Performance | Memory | Model ID |
+|-------|-----------|-------------|--------|-----------|
+| Qwen3-ASR-1.7B-8bit | 30+ languages | 30x real-time | 2.5GB | `mlx-community/Qwen3-ASR-1.7B-8bit` |
+| Qwen3-ASR-0.6B-8bit | 30+ languages | 50x real-time | 1.0GB | `mlx-community/Qwen3-ASR-0.6B-8bit` |
+
+<Info>
+  The 1.7B model provides better accuracy, while the 0.6B model offers faster transcription with slightly lower accuracy.
+</Info>
+
+### Supported languages
+
+Qwen3-ASR models support:
+
+- **Chinese** (Mandarin)
+- **English**
+- **Spanish**, **French**, **German**, **Italian**, **Portuguese**
+- **Japanese**, **Korean**, **Arabic**, **Russian**
+- **Hindi**, **Thai**, **Vietnamese**, **Indonesian**
+- **Plus 15+ additional languages**
+
+Specify language in transcription requests for optimal results.
+
+## Dependencies
+
+OminiX-API requires:
+
+- **macOS 14.0+** (Sonoma or later)
+- **Apple Silicon** (M1/M2/M3/M4)
+- **Rust 1.82+**
+- **Xcode Command Line Tools**
+
+```bash
+xcode-select --install
+```
+
+## Error handling
+
+The API returns OpenAI-compatible error responses:
+
+```json
+{
+  "error": {
+    "message": "Audio file format not supported",
+    "type": "invalid_request_error",
+    "code": "invalid_audio_format"
+  }
+}
+```
+
+### Common error types
+
+| Type | HTTP Status | Description |
+|------|-------------|-------------|
+| `invalid_request_error` | 400 | Malformed request or invalid parameters |
+| `not_found` | 404 | Endpoint or resource not found |
+| `conflict` | 409 | Resource already exists (e.g., model already downloaded) |
+| `server_error` | 500 | Internal server error or inference failure |
+
+## Performance tuning
+
+### Batch size
+
+ASR inference processes audio in batches for optimal GPU utilization:
+
+- **Automatic batching**: Server determines optimal batch size
+- **Memory consideration**: Larger batches use more GPU memory
+- **Throughput vs latency**: Larger batches increase throughput but may increase latency
+
+### Concurrent requests
+
+The server handles concurrent requests efficiently:
+
+- **Async HTTP layer**: Handles thousands of concurrent connections
+- **Serial inference**: Inference runs sequentially (single model instance)
+- **Request queuing**: Requests are queued if inference is busy
+
+<Tip>
+  For high-throughput production deployments, consider running multiple server instances behind a load balancer.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="API endpoints" icon="code" href="/api/endpoints">
+    Complete endpoint reference with examples
+  </Card>
+  
+  <Card title="Speech recognition" icon="microphone" href="/models/speech-recognition">
+    Learn more about ASR models and capabilities
+  </Card>
+</CardGroup>

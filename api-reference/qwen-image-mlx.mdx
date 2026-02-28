@@ -1,0 +1,452 @@
+---
+title: qwen-image-mlx
+description: Qwen-Image-2512 text-to-image generation API using MLX
+---
+
+## Overview
+
+Qwen-Image-2512 is a text-to-image generation model implemented in Rust using MLX bindings for Apple Silicon.
+
+### Key features
+
+- **Qwen transformer**: Large-scale diffusion transformer for high-quality image generation
+- **Flow-matching Euler scheduler**: Efficient sampling with time shifting
+- **Qwen VAE**: 16-channel latent space with 8x downsampling
+- **Classifier-free guidance**: Support for guided generation
+- **Quantization support**: 4-bit quantized models for reduced memory
+
+## Core types
+
+### QwenImagePipeline
+
+End-to-end text-to-image generation pipeline.
+
+```rust
+pub struct QwenImagePipeline {
+    pub transformer: QwenTransformer,
+    pub vae: QwenVAE,
+    pub scheduler: FlowMatchEulerScheduler,
+}
+```
+
+<ParamField path="transformer" type="QwenTransformer">
+  The diffusion transformer model
+</ParamField>
+
+<ParamField path="vae" type="QwenVAE">
+  VAE for encoding/decoding images
+</ParamField>
+
+<ParamField path="scheduler" type="FlowMatchEulerScheduler">
+  Flow-matching scheduler for denoising
+</ParamField>
+
+#### Methods
+
+<ResponseField name="new" type="fn(transformer: QwenTransformer, vae: QwenVAE, num_inference_steps: i32, shift: f32) -> Self">
+  Create a new generation pipeline.
+  
+  <ParamField path="transformer" type="QwenTransformer">
+    Pre-loaded transformer model
+  </ParamField>
+  
+  <ParamField path="vae" type="QwenVAE">
+    Pre-loaded VAE model
+  </ParamField>
+  
+  <ParamField path="num_inference_steps" type="i32">
+    Number of denoising steps (typically 20-50)
+  </ParamField>
+  
+  <ParamField path="shift" type="f32">
+    Time shift parameter for scheduler (typically 3.0)
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="generate" type="fn(&mut self, encoder_hidden_states: &Array, height: i32, width: i32, num_frames: i32, seed: Option<u64>) -> Result<Array, Exception>">
+  Generate image from text embeddings.
+  
+  <ParamField path="encoder_hidden_states" type="&Array">
+    Text embeddings from text encoder `[batch, seq_len, dim]`
+  </ParamField>
+  
+  <ParamField path="height" type="i32">
+    Output image height (must be divisible by 16)
+  </ParamField>
+  
+  <ParamField path="width" type="i32">
+    Output image width (must be divisible by 16)
+  </ParamField>
+  
+  <ParamField path="num_frames" type="i32">
+    Number of frames (1 for single image)
+  </ParamField>
+  
+  <ParamField path="seed" type="Option<u64>">
+    Random seed for reproducibility (None for random)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Generated image `[batch, height, width, 3]` in RGB format
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="generate_cfg" type="fn(&mut self, encoder_hidden_states: &Array, null_encoder_hidden_states: &Array, height: i32, width: i32, num_frames: i32, guidance_scale: f32, seed: Option<u64>) -> Result<Array, Exception>">
+  Generate with classifier-free guidance.
+  
+  <ParamField path="encoder_hidden_states" type="&Array">
+    Conditional text embeddings `[batch, seq_len, dim]`
+  </ParamField>
+  
+  <ParamField path="null_encoder_hidden_states" type="&Array">
+    Unconditional (empty prompt) embeddings `[batch, seq_len, dim]`
+  </ParamField>
+  
+  <ParamField path="guidance_scale" type="f32">
+    Guidance strength (typically 3.5-7.0, higher = more prompt adherence)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Generated image with CFG guidance
+  </ResponseField>
+</ResponseField>
+
+### QwenTransformer
+
+Diffusion transformer model.
+
+```rust
+pub struct QwenTransformer {
+    pub config: QwenTransformerConfig,
+    // ... internal layers
+}
+```
+
+<ResponseField name="forward" type="fn(&mut self, latents: &Array, encoder_hidden_states: &Array, timestep: &Array) -> Result<Array, Exception>">
+  Predict velocity for denoising step.
+  
+  <ParamField path="latents" type="&Array">
+    Noisy latents `[batch, channels, num_frames, height, width]`
+  </ParamField>
+  
+  <ParamField path="encoder_hidden_states" type="&Array">
+    Text embeddings `[batch, seq_len, dim]`
+  </ParamField>
+  
+  <ParamField path="timestep" type="&Array">
+    Current timestep values `[batch]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Predicted velocity for flow-matching
+  </ResponseField>
+</ResponseField>
+
+### QwenTransformerConfig
+
+Configuration for Qwen transformer.
+
+```rust
+pub struct QwenTransformerConfig {
+    // Configuration fields
+}
+```
+
+### QwenVAE
+
+Variational autoencoder for encoding/decoding images.
+
+```rust
+pub struct QwenVAE {
+    // ... internal layers
+}
+```
+
+<ResponseField name="encode" type="fn(&mut self, x: &Array) -> Result<Array, Exception>">
+  Encode images to latent space.
+  
+  <ParamField path="x" type="&Array">
+    Images `[batch, channels, height, width]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Latents `[batch, 16, height/8, width/8]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="decode" type="fn(&mut self, z: &Array) -> Result<Array, Exception>">
+  Decode latents to images.
+  
+  <ParamField path="z" type="&Array">
+    Latents `[batch, 16, num_frames, height, width]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Decoded images `[batch, 3, num_frames, height*8, width*8]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="load_vae_from_dir" type="fn(dir_path: &Path) -> Result<QwenVAE, Exception>">
+  Load VAE model from directory.
+  
+  <ParamField path="dir_path" type="&Path">
+    Path to directory containing VAE weights
+  </ParamField>
+</ResponseField>
+
+## Scheduling
+
+### FlowMatchEulerScheduler
+
+Flow-matching Euler discrete scheduler.
+
+```rust
+pub struct FlowMatchEulerScheduler {
+    pub num_inference_steps: i32,
+    pub shift: f32,
+    // ... internal state
+}
+```
+
+<ParamField path="num_inference_steps" type="i32">
+  Total number of denoising steps
+</ParamField>
+
+<ParamField path="shift" type="f32">
+  Time shift parameter for warping timestep schedule
+</ParamField>
+
+<ResponseField name="new" type="fn(num_inference_steps: i32, shift: f32) -> Self">
+  Create a new scheduler.
+  
+  <ParamField path="num_inference_steps" type="i32">
+    Number of denoising steps (typically 20-50)
+  </ParamField>
+  
+  <ParamField path="shift" type="f32">
+    Time shift parameter (typically 3.0)
+  </ParamField>
+</ResponseField>
+
+<ResponseField name="timesteps" type="fn(&self) -> &[f32]">
+  Get timestep schedule.
+  
+  <ResponseField name="returns" type="&[f32]">
+    Timestep values from 1.0 (pure noise) to 0.0 (clean)
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="sigmas" type="fn(&self) -> &[f32]">
+  Get sigma schedule with time shifting.
+  
+  <ResponseField name="returns" type="&[f32]">
+    Shifted sigma values for each timestep
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="step" type="fn(&self, model_output: &Array, timestep_idx: usize, sample: &Array) -> Result<Array, Exception>">
+  Perform one Euler step.
+  
+  <ParamField path="model_output" type="&Array">
+    Model velocity prediction
+  </ParamField>
+  
+  <ParamField path="timestep_idx" type="usize">
+    Current timestep index
+  </ParamField>
+  
+  <ParamField path="sample" type="&Array">
+    Current noisy sample
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Updated sample: `x_{t-dt} = x_t + (sigma_{t-dt} - sigma_t) * v_pred`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="scale_noise" type="fn(&self, noise: &Array) -> Result<Array, Exception>">
+  Scale initial noise by maximum sigma.
+  
+  <ParamField path="noise" type="&Array">
+    Initial Gaussian noise
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Scaled noise for starting denoising loop
+  </ResponseField>
+</ResponseField>
+
+## Quantization
+
+### QwenQuantizedTransformer
+
+4-bit quantized transformer for reduced memory.
+
+```rust
+pub struct QwenQuantizedTransformer {
+    pub config: QwenConfig,
+    // ... quantized layers
+}
+```
+
+<ResponseField name="load_transformer_weights" type="fn(dir_path: &Path, config: QwenConfig) -> Result<QwenQuantizedTransformer, Exception>">
+  Load 4-bit quantized transformer from directory.
+  
+  <ParamField path="dir_path" type="&Path">
+    Path to directory containing quantized weights
+  </ParamField>
+  
+  <ParamField path="config" type="QwenConfig">
+    Model configuration
+  </ParamField>
+</ResponseField>
+
+### QwenConfig
+
+Configuration for quantized models.
+
+```rust
+pub struct QwenConfig {
+    // Configuration fields
+}
+```
+
+## Text encoder
+
+### QwenTextEncoder
+
+Text encoder for converting text to embeddings.
+
+```rust
+pub struct QwenTextEncoder {
+    pub config: TextEncoderConfig,
+    // ... internal layers
+}
+```
+
+<ResponseField name="forward" type="fn(&mut self, input_ids: &Array) -> Result<Array, Exception>">
+  Encode text tokens to embeddings.
+  
+  <ParamField path="input_ids" type="&Array">
+    Token IDs `[batch, seq_len]`
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Text embeddings `[batch, seq_len, hidden_dim]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="load_text_encoder" type="fn(dir_path: &Path, config: TextEncoderConfig) -> Result<QwenTextEncoder, Exception>">
+  Load text encoder from directory.
+  
+  <ParamField path="dir_path" type="&Path">
+    Path to directory containing encoder weights
+  </ParamField>
+  
+  <ParamField path="config" type="TextEncoderConfig">
+    Encoder configuration
+  </ParamField>
+</ResponseField>
+
+### TextEncoderConfig
+
+Configuration for text encoder.
+
+```rust
+pub struct TextEncoderConfig {
+    // Configuration fields
+}
+```
+
+## Utilities
+
+<ResponseField name="build_attention_mask" type="fn(image_seq_len: i32, text_seq_len: i32, batch_size: i32) -> Result<Array, Exception>">
+  Build attention mask for variable-length sequences.
+  
+  <ParamField path="image_seq_len" type="i32">
+    Image sequence length
+  </ParamField>
+  
+  <ParamField path="text_seq_len" type="i32">
+    Text sequence length
+  </ParamField>
+  
+  <ParamField path="batch_size" type="i32">
+    Batch size
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Attention mask `[batch, 1, total_seq, total_seq]`
+  </ResponseField>
+</ResponseField>
+
+## Example usage
+
+```rust
+use qwen_image_mlx::{
+    QwenImagePipeline, QwenTransformer, QwenVAE,
+    QwenTextEncoder, load_text_encoder, load_vae_from_dir
+};
+
+// Load models
+let text_encoder = load_text_encoder(encoder_path, config)?;
+let transformer = QwenTransformer::new(transformer_config)?;
+let vae = load_vae_from_dir(vae_path)?;
+
+// Create pipeline
+let mut pipeline = QwenImagePipeline::new(
+    transformer,
+    vae,
+    20,    // num_inference_steps
+    3.0,   // shift
+);
+
+// Encode text
+let input_ids = tokenize("a beautiful sunset over mountains");
+let encoder_hidden_states = text_encoder.forward(&input_ids)?;
+
+// Generate image
+let image = pipeline.generate(
+    &encoder_hidden_states,
+    512,   // height
+    512,   // width
+    1,     // num_frames
+    Some(42), // seed
+)?;
+
+// Or with classifier-free guidance
+let null_embeddings = text_encoder.forward(&tokenize(""))?;
+let image = pipeline.generate_cfg(
+    &encoder_hidden_states,
+    &null_embeddings,
+    512, 512, 1,
+    7.5,   // guidance_scale
+    Some(42),
+)?;
+```
+
+## Advanced: Custom denoising loop
+
+```rust
+// Manual control over denoising
+let mut latents = Array::zeros(&[1, 16, 1, 64, 64])?;
+let noise = mlx_rs::random::normal(&latents.shape(), None, None, None)?;
+latents = pipeline.scheduler.scale_noise(&noise)?;
+
+for (idx, &t) in pipeline.scheduler.timesteps().iter().enumerate() {
+    let timestep = Array::from_slice(&[t], &[1]);
+    
+    // Predict velocity
+    let v_pred = pipeline.transformer.forward(
+        &latents,
+        &encoder_hidden_states,
+        &timestep,
+    )?;
+    
+    // Euler step
+    latents = pipeline.scheduler.step(&v_pred, idx, &latents)?;
+}
+
+// Decode
+let image = pipeline.vae.decode(&latents)?;
+```

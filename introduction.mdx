@@ -1,0 +1,149 @@
+---
+title: Introduction to OminiX-MLX
+description: High-performance ML inference on Apple Silicon - LLMs, ASR, TTS, and Image Generation in pure Rust
+---
+
+<img
+  className="block dark:hidden"
+  src="https://github.com/user-attachments/assets/b168cf1c-8e2f-4969-bffa-b57ee33950c0"
+  alt="OminiX-MLX Light"
+  width="500"
+/>
+<img
+  className="hidden dark:block"
+  src="https://github.com/user-attachments/assets/3cc8697b-08f0-4180-91f7-8aca0ffdbdde"
+  alt="OminiX-MLX Dark"
+  width="500"
+/>
+
+# Welcome to OminiX-MLX
+
+OminiX-MLX is a comprehensive Rust ecosystem for running machine learning models on Apple Silicon using [MLX](https://github.com/ml-explore/mlx). It provides safe Rust bindings to Apple's MLX framework and a collection of production-ready model crates for LLMs, Vision-Language Models, Speech Recognition, Text-to-Speech, and Image Generation.
+
+Built for production use with **zero Python dependencies** at inference time.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="GPU acceleration" icon="microchip">
+    Metal-optimized inference on M1/M2/M3/M4 chips with unified memory architecture
+  </Card>
+  <Card title="Pure Rust" icon="rust">
+    No Python runtime required for inference - compile once, deploy anywhere
+  </Card>
+  <Card title="Lazy evaluation" icon="bolt">
+    Automatic kernel fusion and memory optimization through MLX's lazy execution
+  </Card>
+  <Card title="Modular design" icon="cube">
+    Use only what you need - each model family is a separate crate
+  </Card>
+</CardGroup>
+
+## What you can build
+
+<CardGroup cols={2}>
+  <Card title="Language models" icon="message" href="/models/llms">
+    Run Qwen, GLM, Mixtral, Mistral, and MiniCPM models with high throughput
+  </Card>
+  <Card title="Vision-language models" icon="eye" href="/models/vlms">
+    Process images and text together with Moxin-7B VLM
+  </Card>
+  <Card title="Speech recognition" icon="microphone" href="/models/asr">
+    Transcribe audio in 30+ languages with Qwen3-ASR, Paraformer, and FunASR
+  </Card>
+  <Card title="Text-to-speech" icon="volume" href="/models/tts">
+    Clone voices with few-shot learning using GPT-SoVITS
+  </Card>
+  <Card title="Image generation" icon="image" href="/models/image-gen">
+    Generate images from text with FLUX.2-klein and Z-Image
+  </Card>
+  <Card title="API server" icon="server" href="/api-reference/overview">
+    Deploy OpenAI-compatible API endpoints for your models
+  </Card>
+</CardGroup>
+
+## Architecture
+
+OminiX-MLX follows a layered architecture:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              User Application                                │
+│                    (OminiX-API / Custom Rust Application)                   │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────────┐
+        │                       │                           │
+        ▼                       ▼                           ▼
+┌───────────────┐       ┌─────────────────┐       ┌─────────────────┐
+│  LLM / VLM    │       │   Audio Crates  │       │  Image Crates   │
+├───────────────┤       ├─────────────────┤       ├─────────────────┤
+│ qwen3-mlx     │       │ funasr-mlx      │       │ flux-klein-mlx  │
+│ glm4-mlx      │       │ funasr-nano-mlx │       │ zimage-mlx      │
+│ mixtral-mlx   │       │ qwen3-asr-mlx   │       │ qwen-image-mlx  │
+│ moxin-vlm-mlx │       │ gpt-sovits-mlx  │       │                 │
+└───────┬───────┘       └────────┬────────┘       └────────┬────────┘
+        │                        │                         │
+        └────────────────────────┼─────────────────────────┘
+                                 │
+                                 ▼
+                  ┌──────────────────────────┐
+                  │       mlx-rs-core        │
+                  ├──────────────────────────┤
+                  │ • KV Cache Management    │
+                  │ • RoPE Embeddings        │
+                  │ • Attention (SDPA)       │
+                  │ • Audio Processing       │
+                  │ • Metal Kernels          │
+                  └────────────┬─────────────┘
+                               │
+                               ▼
+                  ┌──────────────────────────┐
+                  │         mlx-rs           │
+                  ├──────────────────────────┤
+                  │ • Safe Rust API          │
+                  │ • Array Operations       │
+                  │ • Neural Network Layers  │
+                  └────────────┬─────────────┘
+                               │
+                               ▼
+                  ┌──────────────────────────┐
+                  │      Apple MLX (C++)     │
+                  ├──────────────────────────┤
+                  │ • Metal GPU Backend      │
+                  │ • Unified Memory         │
+                  │ • Lazy Evaluation        │
+                  └──────────────────────────┘
+```
+
+## Performance
+
+Benchmarks on Apple M3 Max (128GB):
+
+| Task | Model | Performance | Memory |
+|------|-------|-------------|--------|
+| LLM | Qwen3-4B | 45 tok/s | 8GB |
+| LLM | GLM4-9B-4bit | 35 tok/s | 6GB |
+| LLM | MiniCPM-SALA-9B-8bit | 28 tok/s | 9.6GB |
+| VLM | Moxin-7B-8bit | 30 tok/s | 10GB |
+| ASR | Qwen3-ASR-1.7B-8bit | 30x real-time | 2.5GB |
+| ASR | Qwen3-ASR-0.6B-8bit | 50x real-time | 1.0GB |
+| TTS | GPT-SoVITS | 4x real-time | 2GB |
+| Image | FLUX.2-klein | ~5s/image | 13GB |
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install Rust, Xcode tools, and set up your environment
+  </Card>
+  <Card title="Quick start" icon="rocket" href="/quickstart">
+    Run your first model in under 5 minutes
+  </Card>
+  <Card title="Model guides" icon="book" href="/models/llms">
+    Explore detailed guides for each model family
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference/overview">
+    Browse the complete API documentation
+  </Card>
+</CardGroup>

@@ -1,0 +1,108 @@
+---
+title: Language models overview
+description: Comprehensive LLM support for Apple Silicon with MLX
+---
+
+OminiX-MLX provides production-ready implementations of popular large language models optimized for Apple Silicon. All models leverage Metal GPU acceleration for fast inference with minimal memory usage.
+
+## Supported model families
+
+<CardGroup cols={2}>
+  <Card title="Qwen3" icon="robot" href="/llm/qwen3">
+    0.6B to 32B parameters. Fast inference with 4-bit quantization support. Best for general-purpose text generation.
+  </Card>
+  <Card title="GLM-4" icon="brain" href="/llm/glm4">
+    9B parameter models with unique architecture. Partial RoPE and fused MLP for efficiency.
+  </Card>
+  <Card title="Mixtral" icon="layer-group" href="/llm/mixtral">
+    8x7B and 8x22B MoE models. Custom Metal kernels for 10-12x faster expert dispatch.
+  </Card>
+  <Card title="Mistral" icon="bolt" href="/llm/mistral">
+    7B models with sliding window attention. Efficient long-context processing with GQA.
+  </Card>
+  <Card title="MiniCPM-SALA" icon="infinity" href="/llm/minicpm-sala">
+    9B hybrid attention model. Million-token context with lightning attention.
+  </Card>
+</CardGroup>
+
+## Common features
+
+All language model implementations share these capabilities:
+
+- **Metal GPU acceleration**: Native Apple Silicon optimization with MLX framework
+- **Quantization support**: 4-bit and 8-bit quantized models for reduced memory usage
+- **KV cache**: Step-based key-value caching for efficient autoregressive generation
+- **Streaming generation**: Token-by-token output for interactive applications
+- **Tokenizer integration**: HuggingFace tokenizer support with chat templates
+
+## Unified API
+
+All models follow a consistent Rust API pattern:
+
+```rust
+use qwen3_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load model and tokenizer
+    let tokenizer = load_tokenizer("path/to/model")?;
+    let mut model = load_model("path/to/model")?;
+
+    // Tokenize prompt
+    let encoding = tokenizer.encode("Hello, I am", true)?;
+    let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    // Generate tokens
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+    for token in generator.take(100) {
+        let token = token?;
+        let text = tokenizer.decode(&[token.item::<u32>()], true)?;
+        print!("{}", text);
+    }
+
+    Ok(())
+}
+```
+
+## Performance comparison
+
+Benchmarks on Apple M3 Max (40-core GPU):
+
+| Model | Size | Prefill | Decode | Memory |
+|-------|------|---------|--------|--------|
+| Qwen3-4B (4-bit) | 3 GB | 250 tok/s | 75 tok/s | 3 GB |
+| GLM-4-9B (4-bit) | 6 GB | ~200 tok/s | ~50 tok/s | 6 GB |
+| Mixtral-8x7B (4-bit) | 26 GB | 80 tok/s | 25 tok/s | 26 GB |
+| Mistral-7B (4-bit) | 4 GB | ~220 tok/s | 55 tok/s | 4 GB |
+| MiniCPM-SALA-9B (8-bit) | 9.6 GB | 443 tok/s | 28 tok/s | 9.6 GB |
+
+## Model selection guide
+
+### For interactive chat
+- **Qwen3-4B (4-bit)**: Best balance of speed and quality for general chat
+- **Mistral-7B (4-bit)**: Strong instruction following with sliding window attention
+
+### For long context
+- **MiniCPM-SALA-9B**: Million-token context capability with hybrid attention
+- **Mistral-7B**: 4096 token sliding window for efficient long sequences
+
+### For maximum quality
+- **Mixtral-8x7B**: 47B total parameters with expert routing
+- **Qwen3-32B**: Largest dense model (requires 64GB+ memory)
+
+### For memory-constrained systems
+- **Qwen3-0.6B**: Smallest model at 1.2 GB
+- **Qwen3-1.7B**: Good quality with only 3.4 GB memory
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Download models" icon="download" href="#model-download">
+    Get pre-converted MLX models from HuggingFace Hub
+  </Card>
+  <Card title="API reference" icon="code" href="/api/llm">
+    Detailed API documentation for all model implementations
+  </Card>
+</CardGroup>

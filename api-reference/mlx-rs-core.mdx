@@ -1,0 +1,646 @@
+---
+title: "mlx-rs-core"
+description: "Shared inference infrastructure for MLX model implementations"
+---
+
+# mlx-rs-core
+
+Shared inference infrastructure used across all model-specific MLX Rust crates (qwen3-mlx, glm4-mlx, gpt-sovits-mlx, etc.).
+
+## Overview
+
+mlx-rs-core provides common components for efficient inference:
+
+- **KV cache** - Fast autoregressive decoding with key-value caching
+- **Token generation** - Generic generation infrastructure with sampling
+- **Attention utilities** - RoPE, attention masks, scaled dot-product attention
+- **Custom kernels** - Fused Metal kernels for performance-critical operations
+- **Audio processing** - Mel spectrogram and audio utilities
+- **Error handling** - Common error types and conversions
+
+## Module exports
+
+```rust
+pub use cache::{ConcatKeyValueCache, KVCache, KeyValueCache};
+pub use error::{Error, Result};
+pub use metal_kernels::{fused_swiglu, fused_modulate};
+pub use sampler::{DefaultSampler, Sampler};
+pub use utils::{
+    create_attention_mask, initialize_rope, scaled_dot_product_attention,
+    AttentionMask, FloatOrString, SdpaMask,
+};
+pub use tokenizers::Tokenizer;
+```
+
+## Cache
+
+KV cache implementations for efficient autoregressive generation.
+
+### KeyValueCache trait
+
+<ParamField path="KeyValueCache" type="trait">
+  Trait for key-value caches used in attention mechanisms
+  
+  ```rust
+  pub trait KeyValueCache {
+      fn offset(&self) -> i32;
+      fn max_size(&self) -> Option<i32>;
+      fn update_and_fetch(
+          &mut self, 
+          keys: Array, 
+          values: Array
+      ) -> Result<(Array, Array), Exception>;
+  }
+  ```
+</ParamField>
+
+<ResponseField name="offset" type="fn() -> i32">
+  Returns current cache offset (number of tokens cached)
+</ResponseField>
+
+<ResponseField name="max_size" type="fn() -> Option<i32>">
+  Returns maximum cache size for sliding window attention, if any
+</ResponseField>
+
+<ResponseField name="update_and_fetch" type="fn">
+  Update cache with new keys/values and return full cache contents
+  
+  <ParamField path="keys" type="Array">
+    New key tensors to add to cache
+  </ParamField>
+  
+  <ParamField path="values" type="Array">
+    New value tensors to add to cache
+  </ParamField>
+  
+  <ResponseField name="returns" type="(Array, Array)">
+    Tuple of (full_keys, full_values) including new and cached tokens
+  </ResponseField>
+</ResponseField>
+
+### ConcatKeyValueCache
+
+<ParamField path="ConcatKeyValueCache" type="struct">
+  Simple concatenation-based KV cache
+  
+  Caches by concatenating new keys/values with existing ones. Simple but can be slow for long sequences.
+  
+  ```rust
+  use mlx_rs_core::ConcatKeyValueCache;
+  
+  let mut cache = ConcatKeyValueCache::new();
+  ```
+</ParamField>
+
+### KVCache
+
+<ParamField path="KVCache" type="struct">
+  Optimized step-based KV cache with pre-allocation
+  
+  Pre-allocates buffers in steps of 256 tokens and uses in-place updates, avoiding expensive concatenation. Matches Python mlx-lm implementation.
+  
+  ```rust
+  use mlx_rs_core::KVCache;
+  
+  // Default: 256 token step size
+  let mut cache = KVCache::new();
+  
+  // Custom step size
+  let mut cache = KVCache::with_step(512);
+  ```
+</ParamField>
+
+<ParamField path="KVCache::new" type="fn() -> Self">
+  Create cache with default step size of 256 tokens
+</ParamField>
+
+<ParamField path="KVCache::with_step" type="fn(step: i32) -> Self">
+  Create cache with custom step size
+  
+  <ParamField path="step" type="i32">
+    Number of tokens to pre-allocate per growth step
+  </ParamField>
+</ParamField>
+
+## Generate
+
+Generic token generation infrastructure with builder pattern.
+
+### Generate struct
+
+<ParamField path="Generate" type="struct">
+  Iterator-based token generator with configurable sampling
+  
+  ```rust
+  use mlx_rs_core::Generate;
+  
+  let generator = Generate::builder()
+      .tokenizer(tokenizer)
+      .model(model)
+      .prompt(prompt_tokens)
+      .temp(0.7)
+      .max_tokens(256)
+      .build();
+      
+  for response in generator {
+      let response = response?;
+      println!("Generated: {}", response.text);
+  }
+  ```
+</ParamField>
+
+### Builder
+
+<ParamField path="Generate::builder" type="fn() -> Builder">
+  Create new generation builder
+</ParamField>
+
+<ParamField path="Builder::tokenizer" type="fn(tokenizer: Tokenizer) -> Self">
+  Set tokenizer for decoding tokens to text
+</ParamField>
+
+<ParamField path="Builder::model" type="fn(model: M) -> Self">
+  Set model for generation (must implement `Module` trait)
+</ParamField>
+
+<ParamField path="Builder::prompt" type="fn(prompt: Array) -> Self">
+  Set prompt tokens as Array
+</ParamField>
+
+<ParamField path="Builder::temp" type="fn(temp: f32) -> Self">
+  Set sampling temperature (default: 0.0 for greedy)
+  
+  - `temp = 0.0` - Greedy decoding (argmax)
+  - `temp > 0.0` - Sampling with temperature
+</ParamField>
+
+<ParamField path="Builder::max_tokens" type="fn(max_tokens: usize) -> Self">
+  Set maximum number of tokens to generate (default: 256)
+</ParamField>
+
+<ParamField path="Builder::sampler" type="fn(sampler: S) -> Self">
+  Set custom sampler implementation
+</ParamField>
+
+<ParamField path="Builder::build" type="fn() -> Generate">
+  Build the generator (consumes builder)
+</ParamField>
+
+### Response
+
+<ResponseField name="Response" type="struct">
+  Generated text response
+  
+  ```rust
+  pub struct Response {
+      pub text: String,
+      pub ids: Vec<u32>,
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="text" type="String">
+  Decoded text from generated tokens
+</ResponseField>
+
+<ResponseField name="ids" type="Vec<u32>">
+  Generated token IDs
+</ResponseField>
+
+## Sampler
+
+Token sampling strategies for generation.
+
+### Sampler trait
+
+<ParamField path="Sampler" type="trait">
+  Trait for implementing custom sampling strategies
+  
+  ```rust
+  pub trait Sampler {
+      fn sample(&mut self, logits: &Array, temp: f32) -> Result<Array, Exception>;
+  }
+  ```
+</ParamField>
+
+<ParamField path="sample" type="fn(&mut self, logits: &Array, temp: f32) -> Result<Array>">
+  Sample next token from logits
+  
+  <ParamField path="logits" type="&Array">
+    Model output logits (unnormalized scores)
+  </ParamField>
+  
+  <ParamField path="temp" type="f32">
+    Temperature for sampling (0.0 = greedy)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Sampled token ID(s)
+  </ResponseField>
+</ParamField>
+
+### DefaultSampler
+
+<ParamField path="DefaultSampler" type="struct">
+  Default sampling implementation
+  
+  - Temperature 0.0: Greedy decoding (argmax)
+  - Temperature > 0.0: Categorical sampling with temperature scaling
+  
+  ```rust
+  use mlx_rs_core::DefaultSampler;
+  
+  let mut sampler = DefaultSampler;
+  let token = sampler.sample(&logits, 0.7)?;
+  ```
+</ParamField>
+
+## Utilities (utils)
+
+Attention utilities, RoPE initialization, and helper functions.
+
+### RoPE initialization
+
+<ParamField path="initialize_rope" type="fn">
+  Initialize rotary position embedding
+  
+  ```rust
+  use mlx_rs_core::initialize_rope;
+  
+  let rope = initialize_rope(
+      dims,           // Head dimension
+      base,           // Base frequency (typically 10000.0)
+      traditional,    // Traditional vs modern RoPE
+      &scaling_config, // Optional scaling config
+      max_position_embeddings
+  )?;
+  ```
+  
+  <ParamField path="dims" type="i32">
+    Dimension of each attention head
+  </ParamField>
+  
+  <ParamField path="base" type="f32">
+    Base frequency for rotations (typically 10000.0)
+  </ParamField>
+  
+  <ParamField path="traditional" type="bool">
+    Use traditional RoPE formulation
+  </ParamField>
+  
+  <ParamField path="scaling_config" type="&Option<HashMap<String, FloatOrString>>">
+    Optional scaling configuration for extended context
+    - `"type"`: "default", "linear", etc.
+    - `"factor"`: Scaling factor
+  </ParamField>
+  
+  <ParamField path="max_position_embeddings" type="i32">
+    Maximum sequence length
+  </ParamField>
+  
+  <ResponseField name="returns" type="Result<nn::Rope>">
+    Configured RoPE module
+  </ResponseField>
+</ParamField>
+
+### Attention masks
+
+<ParamField path="create_attention_mask" type="fn">
+  Create causal attention mask for autoregressive generation
+  
+  ```rust
+  use mlx_rs_core::create_attention_mask;
+  
+  let mask = create_attention_mask(
+      &hidden_states,
+      &cache,
+      Some(return_array)
+  )?;
+  ```
+  
+  <ParamField path="h" type="&Array">
+    Hidden states tensor (shape: [batch, seq_len, ...])
+  </ParamField>
+  
+  <ParamField path="cache" type="&[Option<C>]">
+    KV cache array (one per layer)
+  </ParamField>
+  
+  <ParamField path="return_array" type="Option<bool>">
+    Force returning explicit mask array instead of hardware causal
+  </ParamField>
+  
+  <ResponseField name="returns" type="Option<AttentionMask>">
+    - `None` for single token (no mask needed)
+    - `Some(AttentionMask::Causal)` for hardware-optimized causal
+    - `Some(AttentionMask::Array)` for explicit mask array
+  </ResponseField>
+</ParamField>
+
+<ParamField path="AttentionMask" type="enum">
+  Attention mask variants
+  
+  ```rust
+  pub enum AttentionMask {
+      Array(Array),  // Explicit mask array
+      Causal,        // Hardware-optimized causal mask
+  }
+  ```
+</ParamField>
+
+<ParamField path="SdpaMask" type="enum">
+  Mask type for scaled dot-product attention
+  
+  ```rust
+  pub enum SdpaMask<'a> {
+      Causal,           // Hardware causal mask
+      Array(&'a Array), // Explicit mask reference
+  }
+  ```
+</ParamField>
+
+### Scaled dot-product attention
+
+<ParamField path="scaled_dot_product_attention" type="fn">
+  Compute scaled dot-product attention
+  
+  ```rust
+  use mlx_rs_core::{scaled_dot_product_attention, SdpaMask};
+  
+  let output = scaled_dot_product_attention(
+      queries,
+      keys,
+      values,
+      None,           // Optional cache
+      scale,          // 1.0 / sqrt(head_dim)
+      Some(SdpaMask::Causal)
+  )?;
+  ```
+  
+  <ParamField path="queries" type="Array">
+    Query tensor [batch, n_heads, seq_q, head_dim]
+  </ParamField>
+  
+  <ParamField path="keys" type="Array">
+    Key tensor [batch, n_kv_heads, seq_k, head_dim]
+  </ParamField>
+  
+  <ParamField path="values" type="Array">
+    Value tensor [batch, n_kv_heads, seq_v, head_dim]
+  </ParamField>
+  
+  <ParamField path="cache" type="Option<C>">
+    Optional KV cache
+  </ParamField>
+  
+  <ParamField path="scale" type="f32">
+    Attention scale factor (typically 1.0 / sqrt(head_dim))
+  </ParamField>
+  
+  <ParamField path="mask" type="Option<SdpaMask>">
+    Optional attention mask
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Attention output [batch, n_heads, seq_q, head_dim]
+  </ResponseField>
+</ParamField>
+
+## Metal kernels
+
+Custom fused Metal kernels for performance-critical operations.
+
+### fused_swiglu
+
+<ParamField path="fused_swiglu" type="fn(x: &Array, gate: &Array) -> Result<Array>">
+  Fused SwiGLU activation using custom Metal kernel
+  
+  Computes: `silu(gate) * x = (gate / (1 + exp(-gate))) * x`
+  
+  **Performance**: 10-12x faster than separate `silu()` + `multiply()` calls. Critical for MoE models with many SwiGLU operations.
+  
+  ```rust
+  use mlx_rs_core::fused_swiglu;
+  
+  let x = array!([1.0, 2.0, 3.0]);
+  let gate = array!([0.5, 1.0, 1.5]);
+  let output = fused_swiglu(&x, &gate)?;
+  ```
+  
+  <ParamField path="x" type="&Array">
+    Input tensor (any shape)
+  </ParamField>
+  
+  <ParamField path="gate" type="&Array">
+    Gate tensor (same shape as x)
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    SwiGLU output (same shape as inputs)
+  </ResponseField>
+</ParamField>
+
+### fused_modulate
+
+<ParamField path="fused_modulate" type="fn(x: &Array, shift: &Array, scale: &Array) -> Result<Array>">
+  Fused LayerNorm + Modulation using custom Metal kernel
+  
+  Computes: `(1 + scale) * LayerNorm(x) + shift`
+  
+  where LayerNorm has no learnable parameters (elementwise_affine=False).
+  
+  **Performance**: Fuses 7+ operations into single kernel. Critical for DiT (Diffusion Transformer) models:
+  - 4 modulate calls per block
+  - 60 blocks
+  - 40 forward passes per generation
+  - = 9,600 modulate calls per image
+  
+  ```rust
+  use mlx_rs_core::fused_modulate;
+  
+  let x = array!([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]);
+  let shift = array!([0.1, 0.2, 0.3]);
+  let scale = array!([0.5, 0.6, 0.7]);
+  
+  let output = fused_modulate(&x, &shift, &scale)?;
+  ```
+  
+  <ParamField path="x" type="&Array">
+    Input tensor [batch, seq, dim] or [seq, dim]
+  </ParamField>
+  
+  <ParamField path="shift" type="&Array">
+    Shift tensor (flattened to [dim])
+  </ParamField>
+  
+  <ParamField path="scale" type="&Array">
+    Scale tensor (flattened to [dim])
+  </ParamField>
+  
+  <ResponseField name="returns" type="Array">
+    Modulated output (same shape as x)
+  </ResponseField>
+</ParamField>
+
+## Model input/output traits
+
+Traits for generic generation infrastructure.
+
+### ModelInput trait
+
+<ParamField path="ModelInput" type="trait">
+  Trait for model input types that can be constructed from builder
+  
+  ```rust
+  pub trait ModelInput<'a, C, T> {
+      fn from_model_input_builder(builder: ModelInputBuilder<'a, C, T>) -> Self;
+  }
+  ```
+  
+  Models implement this to receive tokens, cache, and state during generation.
+</ParamField>
+
+### ModelOutput trait
+
+<ParamField path="ModelOutput" type="trait">
+  Trait for model output types that provide logits
+  
+  ```rust
+  pub trait ModelOutput {
+      fn logits(&self) -> &Array;
+  }
+  ```
+  
+  Implemented by model outputs to extract next-token logits.
+</ParamField>
+
+## Tokenizer loading
+
+<ParamField path="load_tokenizer" type="fn(model_dir: impl AsRef<Path>) -> Result<Tokenizer>">
+  Load tokenizer from model directory
+  
+  Loads `tokenizer.json` from the specified directory.
+  
+  ```rust
+  use mlx_rs_core::load_tokenizer;
+  
+  let tokenizer = load_tokenizer("models/qwen-1.5-0.5b")?;
+  ```
+  
+  <ParamField path="model_dir" type="impl AsRef<Path>">
+    Path to model directory containing tokenizer.json
+  </ParamField>
+  
+  <ResponseField name="returns" type="Result<Tokenizer>">
+    Loaded tokenizer instance
+  </ResponseField>
+</ParamField>
+
+## Error handling
+
+<ParamField path="Error" type="enum">
+  Common error type for mlx-rs-core operations
+  
+  ```rust
+  pub enum Error {
+      Mlx(Exception),
+      Tokenizer(String),
+      // ... other variants
+  }
+  ```
+</ParamField>
+
+<ParamField path="Result" type="type">
+  Result type alias with mlx-rs-core Error
+  
+  ```rust
+  pub type Result<T> = std::result::Result<T, Error>;
+  ```
+</ParamField>
+
+## Helper macros
+
+<ParamField path="try_unwrap!" type="macro">
+  Helper macro for early returns in iterator contexts
+  
+  ```rust
+  // In iterator that returns Option<Result<T, E>>
+  let value = try_unwrap!(some_operation());
+  // Automatically converts errors and returns Some(Err(e))
+  ```
+</ParamField>
+
+## Audio processing
+
+The `audio` module provides utilities for audio processing:
+
+- Mel spectrogram computation
+- Audio preprocessing for speech models
+- Feature extraction utilities
+
+(See audio module documentation for detailed API)
+
+## Speculative decoding
+
+The `speculative` module provides support for speculative decoding to accelerate generation:
+
+- Draft model integration
+- Verification and acceptance logic
+- Multi-token generation strategies
+
+(See speculative module documentation for detailed API)
+
+## Convert utilities
+
+The `convert` module (requires `convert` feature) provides model conversion utilities:
+
+```rust
+#[cfg(feature = "convert")]
+use mlx_rs_core::convert;
+```
+
+Utilities for converting models from other frameworks to MLX format.
+
+## Example usage
+
+```rust
+use mlx_rs_core::{
+    Generate, KVCache, DefaultSampler, load_tokenizer,
+    initialize_rope, create_attention_mask,
+};
+use mlx_rs::{module::Module, Array};
+
+// Load model and tokenizer
+let model = YourModel::new();
+let tokenizer = load_tokenizer("path/to/model")?;
+
+// Encode prompt
+let encoding = tokenizer.encode("Hello, world!", true)?;
+let prompt = Array::from_slice(
+    encoding.get_ids(),
+    &[encoding.len() as i32]
+);
+
+// Generate tokens
+let generator = Generate::builder()
+    .tokenizer(tokenizer)
+    .model(model)
+    .prompt(prompt)
+    .temp(0.7)
+    .max_tokens(100)
+    .build();
+
+for response in generator {
+    let response = response?;
+    println!("Generated: {}", response.text);
+}
+```
+
+## Feature flags
+
+- `convert` - Enable model conversion utilities
+
+```toml
+[dependencies]
+mlx-rs-core = { version = "0.1", features = ["convert"] }
+```

@@ -1,0 +1,440 @@
+---
+title: FunASR-Nano
+description: LLM-based 800M parameter speech recognition supporting 31 languages
+---
+
+FunASR-Nano is an LLM-based automatic speech recognition system that combines a frozen Whisper encoder with a Qwen language model to achieve robust multilingual transcription with semantic understanding.
+
+## Features
+
+- **800M parameters** - Balanced size/quality tradeoff
+- **31 languages** (MLT variant) or Chinese/English/Japanese (base)
+- **7 Chinese dialects** + 26 regional accents
+- **Far-field recognition** - ~93% accuracy in noisy environments
+- **Apple Silicon optimized** - Metal GPU acceleration via MLX
+- **LLM-based** - Semantic understanding beyond simple transcription
+
+## Architecture
+
+FunASR-Nano uses a unique architecture that combines frozen audio encoding with LLM-based decoding:
+
+```
+Audio (16kHz)
+    │
+    ▼
+┌─────────────────────┐
+│   Mel Spectrogram   │  80 bins, 25ms window, 10ms hop
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│   Whisper Encoder   │  Frozen, extracts audio features
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│   Audio Adaptor     │  Linear projection to LLM dim
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│      Qwen LLM       │  Causal language model
+└─────────┬───────────┘
+          │
+          ▼
+      Text Output
+```
+
+### Why LLM-based ASR?
+
+Traditional ASR models map acoustic features directly to text tokens. LLM-based ASR adds semantic understanding:
+
+- **Context awareness** - Better handling of ambiguous pronunciations
+- **Semantic correction** - Can infer correct words from context
+- **Natural language output** - Proper punctuation and formatting
+- **Multilingual capability** - Leverages LLM's cross-lingual knowledge
+
+## Model variants
+
+<CardGroup cols={2}>
+  <Card title="Fun-ASR-Nano-2512" icon="microphone">
+    **Base model**
+    
+    - Languages: Chinese, English, Japanese
+    - Parameters: 800M
+    - Size: ~1.6 GB (fp16)
+    - HuggingFace: `mlx-community/Fun-ASR-Nano-2512-fp16`
+  </Card>
+  
+  <Card title="Fun-ASR-MLT-Nano-2512" icon="globe">
+    **Multilingual**
+    
+    - Languages: 31 languages
+    - Parameters: 800M
+    - Size: ~1.6 GB (fp16)
+    - HuggingFace: `mlx-community/Fun-ASR-MLT-Nano-2512-fp16`
+  </Card>
+</CardGroup>
+
+## Supported languages
+
+### Fun-ASR-Nano-2512 (base)
+
+- Chinese (Mandarin + 7 dialects)
+- English
+- Japanese
+- 26 Chinese regional accents
+
+### Fun-ASR-MLT-Nano-2512 (multilingual)
+
+31 languages including:
+Chinese, English, Japanese, Korean, Spanish, French, German, Italian, Portuguese, Russian, Arabic, Hindi, Turkish, Vietnamese, Thai, Indonesian, Malay, Filipino, Persian, Hebrew, Bengali, Tamil, Telugu, Urdu, Punjabi, Gujarati, Kannada, Malayalam, Marathi, Nepali, Sinhala
+
+## Quick start
+
+<Steps>
+  <Step title="Download the model">
+    Download the MLX-converted model from HuggingFace:
+    
+    ```bash
+    # Fun-ASR-Nano (Chinese/English/Japanese)
+    huggingface-cli download mlx-community/Fun-ASR-Nano-2512-fp16 \
+        --local-dir ~/.OminiX/models/funasr-nano
+    
+    # Fun-ASR-MLT-Nano (31 languages)
+    huggingface-cli download mlx-community/Fun-ASR-MLT-Nano-2512-fp16 \
+        --local-dir ~/.OminiX/models/funasr-mlt-nano
+    
+    # Using git lfs
+    git lfs install
+    git clone https://huggingface.co/mlx-community/Fun-ASR-Nano-2512-fp16 \
+        ~/.OminiX/models/funasr-nano
+    ```
+  </Step>
+  
+  <Step title="Verify model files">
+    Check that all required files are present:
+    
+    ```bash
+    ls ~/.OminiX/models/funasr-nano/
+    # Output:
+    # model.safetensors         # MLX weights
+    # config.json               # Model configuration
+    # tokenizer.json            # Tokenizer
+    # vocab.json                # Vocabulary
+    # merges.txt                # BPE merges
+    # tokenizer_config.json     # Tokenizer settings
+    ```
+  </Step>
+  
+  <Step title="Transcribe audio">
+    Run transcription:
+    
+    ```bash
+    # Basic transcription
+    cargo run --release --example transcribe -- \
+        ~/.OminiX/models/funasr-nano ./audio.wav
+    
+    # Benchmark performance
+    cargo run --release --example benchmark -- \
+        ~/.OminiX/models/funasr-nano ./audio.wav
+    ```
+  </Step>
+</Steps>
+
+## Usage
+
+### Command-line interface
+
+```bash
+# Transcribe with default model
+cargo run --release --example transcribe -- ./audio.wav
+
+# Specify model directory
+cargo run --release --example transcribe -- /path/to/model ./audio.wav
+
+# Benchmark performance (10 iterations)
+cargo run --release --example benchmark -- /path/to/model ./audio.wav 10
+```
+
+### Library usage
+
+```rust
+use funasr_nano_mlx::{FunASRNano, default_model_path};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load model from default path
+    let mut model = FunASRNano::load(default_model_path())?;
+    
+    // Or load from custom path
+    let mut model = FunASRNano::load("/path/to/model")?;
+
+    // Transcribe audio file
+    let text = model.transcribe("audio.wav")?;
+    println!("Transcription: {}", text);
+
+    Ok(())
+}
+```
+
+## API reference
+
+### Load model
+
+```rust
+use funasr_nano_mlx::{FunASRNano, default_model_path};
+
+// Load from default path (~/.OminiX/models/funasr-nano)
+let mut model = FunASRNano::load(default_model_path())?;
+
+// Load from custom path
+let mut model = FunASRNano::load("/path/to/Fun-ASR-Nano-2512")?;
+```
+
+### Transcribe audio
+
+```rust
+// Transcribe from file path
+let text = model.transcribe("audio.wav")?;
+
+// Transcribe from PathBuf
+use std::path::PathBuf;
+let audio_path = PathBuf::from("audio.wav");
+let text = model.transcribe(&audio_path)?;
+```
+
+### Environment variables
+
+```bash
+# Set custom model path
+export FUNASR_NANO_MODEL_DIR=/path/to/model
+
+# Set language (for SenseVoice variant, if applicable)
+export ASR_NANO_LANGUAGE=auto  # Options: zh, en, ja, ko, auto
+
+# Use in application
+cargo run --release --example transcribe -- audio.wav
+```
+
+## Performance benchmarks
+
+Expected performance on Apple M3 Max:
+
+| Metric | Value |
+|--------|-------|
+| Prompt processing | ~100-150 tok/s |
+| Decode | ~30-50 tok/s |
+| Memory (fp16) | ~2-3 GB |
+| Real-time factor | < 0.1 |
+
+<Note>
+  Performance varies based on audio length and content. The LLM-based architecture trades some speed for improved semantic understanding and accuracy in challenging conditions.
+</Note>
+
+## Example code
+
+Complete transcription example from `examples/transcribe.rs`:
+
+```rust
+use funasr_nano_mlx::{FunASRNano, default_model_path};
+use std::time::Instant;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Parse arguments: [model_dir] <audio_path>
+    let (model_dir, audio_path) = match args.len() {
+        1 => {
+            let model = default_model_path();
+            let audio = model.join("example/zh.wav");
+            (model, audio)
+        }
+        2 => {
+            (default_model_path(), std::path::PathBuf::from(&args[1]))
+        }
+        _ => {
+            (std::path::PathBuf::from(&args[1]), 
+             std::path::PathBuf::from(&args[2]))
+        }
+    };
+
+    println!("Loading model from {}...", model_dir.display());
+    let start = Instant::now();
+    let mut model = FunASRNano::load(&model_dir)
+        .expect("Failed to load model");
+    println!("Model loaded in {:.2}s\n", start.elapsed().as_secs_f32());
+
+    println!("Transcribing {}...", audio_path.display());
+    let start = Instant::now();
+    match model.transcribe(&audio_path) {
+        Ok(text) => {
+            let elapsed = start.elapsed().as_secs_f32();
+            println!("\nTranscription ({:.2}s):", elapsed);
+            println!("{}", text);
+        }
+        Err(e) => {
+            eprintln!("Transcription failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+```
+
+## Benchmark example
+
+Measure performance across multiple iterations:
+
+```rust
+use funasr_nano_mlx::{FunASRNano, default_model_path, audio};
+use std::time::Instant;
+
+let mut model = FunASRNano::load(default_model_path())?;
+
+// Load audio to get duration
+let (samples, sample_rate) = audio::load_wav("audio.wav")?;
+let duration_secs = samples.len() as f32 / sample_rate as f32;
+
+// Warmup
+let _result = model.transcribe("audio.wav")?;
+
+// Benchmark
+let iterations = 10;
+let mut times = Vec::new();
+
+for _ in 0..iterations {
+    let start = Instant::now();
+    let _result = model.transcribe("audio.wav")?;
+    let elapsed = start.elapsed().as_millis() as f64;
+    times.push(elapsed);
+}
+
+// Calculate statistics
+times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+let mean = times.iter().sum::<f64>() / times.len() as f64;
+let rtf_mean = (mean / 1000.0) / duration_secs as f64;
+
+println!("Mean latency: {:.1} ms", mean);
+println!("Mean RTF: {:.4}x ({:.1}x real-time)", rtf_mean, 1.0 / rtf_mean);
+```
+
+## Project structure
+
+```
+funasr-nano-mlx/
+├── src/
+│   ├── lib.rs              # Public API
+│   ├── audio.rs            # Audio loading & mel spectrogram
+│   ├── whisper_encoder.rs  # Whisper-based audio encoder
+│   ├── adaptor.rs          # Audio-to-LLM adaptor
+│   ├── qwen.rs             # Qwen LLM (from qwen3-mlx)
+│   ├── model.rs            # Combined FunASRNano model
+│   └── error.rs            # Error types
+├── examples/
+│   ├── transcribe.rs       # Basic transcription
+│   └── benchmark.rs        # Performance benchmarking
+└── Cargo.toml
+```
+
+## Troubleshooting
+
+### Garbage output
+
+If transcription produces incorrect or garbled output, common causes include:
+
+1. **Audio preprocessing mismatch** (most common)
+   - Verify audio is 16kHz mono
+   - Check mel spectrogram parameters (80 bins, 25ms window, 10ms hop)
+   - Ensure proper normalization
+
+2. **Float16 precision drift**
+   - Deep encoders can accumulate numerical errors
+   - Try reloading the model or using higher precision
+
+3. **Model path case sensitivity**
+   - macOS is case-insensitive but some tools are not
+   - Verify exact case of model file paths
+
+### Memory issues
+
+```rust
+// Free memory between transcriptions
+drop(model);
+let model = FunASRNano::load(model_path)?;
+```
+
+### Performance optimization
+
+- Use fp16 models for best speed/quality balance
+- Process audio in batches when possible
+- Ensure audio is pre-resampled to 16kHz
+- Keep model loaded between transcriptions
+
+## Model sources
+
+### MLX-converted models (required)
+
+| Model | HuggingFace URL |
+|-------|----------------|
+| Fun-ASR-Nano-2512 | https://huggingface.co/mlx-community/Fun-ASR-Nano-2512-fp16 |
+| Fun-ASR-MLT-Nano-2512 | https://huggingface.co/mlx-community/Fun-ASR-MLT-Nano-2512-fp16 |
+
+### Original PyTorch models (reference)
+
+| Source | URL |
+|--------|-----|
+| HuggingFace | https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512 |
+| ModelScope | https://www.modelscope.cn/models/FunAudioLLM/Fun-ASR-Nano-2512 |
+| GitHub | https://github.com/modelscope/FunASR |
+
+## Requirements
+
+- macOS 13.5+ (Ventura or later)
+- Apple Silicon (M1/M2/M3/M4)
+- Rust 1.82.0+
+
+## Use cases
+
+### Far-field speech recognition
+
+FunASR-Nano excels at far-field speech recognition in noisy environments:
+- Conference room meetings
+- Smart speaker applications
+- Phone call transcription
+- Video conferencing
+
+### Accent-robust transcription
+
+Supports 26 Chinese regional accents:
+- Beijing, Shanghai, Guangzhou, Shenzhen
+- Chengdu, Chongqing, Hangzhou, Nanjing
+- And 18 more regional variants
+
+### Semantic understanding
+
+LLM-based architecture enables:
+- Context-aware word choice
+- Proper punctuation and formatting
+- Handling of homophones
+- Natural language output
+
+## Comparison with other models
+
+| Feature | FunASR-Nano | Qwen3-ASR | Paraformer |
+|---------|-------------|-----------|------------|
+| Architecture | LLM-based | Encoder-decoder | Non-autoregressive |
+| Speed | ~10x RT | 30-50x RT | 18-75x RT |
+| Languages | 31 | 30+ | Chinese only |
+| Far-field | Excellent | Good | Good |
+| Semantic understanding | Yes | Limited | No |
+| Memory | ~2-3 GB | ~2.5 GB | ~1 GB |
+
+## References
+
+- [Fun-ASR GitHub](https://github.com/FunAudioLLM/Fun-ASR)
+- [Technical Report](https://arxiv.org/abs/2509.12508)
+- [Model on HuggingFace](https://huggingface.co/FunAudioLLM/Fun-ASR-Nano-2512)
+- [FunASR Framework](https://github.com/modelscope/FunASR)
+
+## License
+
+MIT

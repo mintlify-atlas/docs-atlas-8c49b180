@@ -1,0 +1,417 @@
+---
+title: Mistral models
+description: Efficient 7B language models with sliding window attention
+---
+
+Mistral-7B is a high-performance 7B parameter language model featuring sliding window attention, Grouped Query Attention (GQA), and RoPE position embeddings for efficient long-context processing.
+
+## Features
+
+- **Sliding window attention**: Efficient processing of long contexts (4096 token window)
+- **Grouped Query Attention (GQA)**: Reduced KV cache memory with 4:1 query:key-value head ratio
+- **RoPE position embeddings**: Rotary position encoding for better extrapolation
+- **Quantization support**: 4-bit and 8-bit quantized models available
+- **SwiGLU activation**: Improved MLP activation function
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+mistral-mlx = { path = "../mistral-mlx" }
+mlx-rs = "0.18"
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download model">
+    Download 4-bit quantized model (recommended):
+
+    ```bash
+    huggingface-cli download mlx-community/Mistral-7B-Instruct-v0.3-4bit \
+        --local-dir ./models/Mistral-7B-4bit
+    ```
+
+    Or full precision model:
+
+    ```bash
+    huggingface-cli download mlx-community/Mistral-7B-Instruct-v0.3-bf16 \
+        --local-dir ./models/Mistral-7B
+    ```
+  </Step>
+
+  <Step title="Run text generation">
+    ```bash
+    cargo run --release --example generate_mistral -- \
+        --model mlx-community/Mistral-7B-Instruct-v0.3-4bit \
+        --prompt "Explain machine learning in simple terms"
+    ```
+  </Step>
+
+  <Step title="Use in your code">
+    ```rust
+    use mistral_mlx::{load_model, load_tokenizer, Generate, KVCache};
+    use mlx_rs::ops::indexing::NewAxis;
+
+    let mut model = load_model("./models/Mistral-7B-4bit")?;
+    let tokenizer = load_tokenizer("./models/Mistral-7B-4bit")?;
+
+    // Prepare prompt with Mistral Instruct format
+    let formatted = format!("[INST] {} [/INST]", "Hello");
+    let encoding = tokenizer.encode(formatted.as_str(), true)?;
+    let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    // Generate
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+    for token in generator.take(50) {
+        let token = token?;
+        print!("{}", tokenizer.decode(&[token.item::<u32>()], true)?);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Architecture
+
+Mistral uses an optimized transformer architecture:
+
+```
+Mistral-7B
+├── Embedding (vocab_size=32000, dim=4096)
+├── 32x DecoderLayer
+│   ├── input_layernorm
+│   ├── Attention (GQA with sliding window)
+│   │   ├── q_proj (32 heads)
+│   │   ├── k_proj (8 heads, GQA)
+│   │   ├── v_proj (8 heads, GQA)
+│   │   └── o_proj
+│   ├── post_attention_layernorm
+│   └── MLP (SwiGLU)
+│       ├── gate_proj
+│       ├── up_proj
+│       └── down_proj
+└── norm
+```
+
+### Key optimizations
+
+#### Sliding window attention
+
+Mistral uses a 4096 token attention window instead of full attention:
+
+```rust
+// Traditional attention: quadratic in sequence length
+// Attention complexity: O(n²)
+
+// Mistral sliding window: linear with fixed window
+// Attention complexity: O(n × window_size)
+// window_size = 4096 tokens
+```
+
+This allows efficient processing of long sequences while maintaining local context awareness.
+
+#### Grouped Query Attention (GQA)
+
+32 query heads share 8 key-value heads (4:1 ratio):
+
+```
+Query:  32 heads × 128 dims = 4096 dims
+Key:     8 heads × 128 dims = 1024 dims  
+Value:   8 heads × 128 dims = 1024 dims
+
+KV cache reduction: 4x smaller than full MHA
+```
+
+This reduces memory usage without significant quality loss.
+
+#### SwiGLU activation
+
+Replaces traditional ReLU/GELU in MLP:
+
+```rust
+// Traditional MLP
+let hidden = gelu(linear1(x));
+let output = linear2(hidden);
+
+// SwiGLU MLP (better performance)
+let gate = gate_proj(x);
+let up = up_proj(x);
+let hidden = silu(gate) * up;  // SwiGLU
+let output = down_proj(hidden);
+```
+
+## Code example
+
+From [examples/generate_mistral.rs](https://github.com/moxin-org/OminiX-MLX/blob/main/mistral-mlx/examples/generate_mistral.rs):
+
+```rust
+use mistral_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Args {
+    #[arg(long, default_value = "mlx-community/Mistral-7B-Instruct-v0.2-4bit")]
+    model: String,
+
+    #[arg(long)]
+    prompt: String,
+
+    #[arg(long, default_value = "100")]
+    max_tokens: usize,
+
+    #[arg(long, default_value = "0.7")]
+    temperature: f32,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // Load model and tokenizer
+    let tokenizer = load_tokenizer(&model_dir)?;
+    let mut model = load_model(&model_dir)?;
+
+    // Mistral Instruct format: [INST] prompt [/INST]
+    let formatted = format!("[INST] {} [/INST]", args.prompt);
+    let encoding = tokenizer.encode(formatted.as_str(), true)?;
+    let prompt_tokens = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    println!("Prompt ({} tokens): {}", encoding.get_ids().len(), args.prompt);
+    println!("---");
+
+    // Generate
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(
+        &mut model,
+        &mut cache,
+        args.temperature,
+        &prompt_tokens,
+    );
+
+    let mut token_ids = Vec::new();
+    let eos_token: u32 = 2;  // </s>
+
+    for token in generator.take(args.max_tokens) {
+        let token = token?;
+        let token_id = token.item::<u32>();
+
+        if token_id == eos_token {
+            break;
+        }
+
+        token_ids.push(token_id);
+    }
+
+    let response = tokenizer.decode(&token_ids, true)?;
+    println!("{}", response);
+
+    Ok(())
+}
+```
+
+## Supported models
+
+<CardGroup cols={2}>
+  <Card title="Mistral-7B-v0.3 (bf16)" icon="server">
+    **Parameters**: 7B  
+    **Size**: 14 GB  
+    **Precision**: bfloat16  
+    **Use case**: Maximum quality
+
+    ```bash
+    huggingface-cli download \
+      mlx-community/Mistral-7B-Instruct-v0.3-bf16 \
+      --local-dir ./models/Mistral-7B
+    ```
+  </Card>
+
+  <Card title="Mistral-7B-v0.3 (4-bit)" icon="microchip">
+    **Parameters**: 7B  
+    **Size**: 4 GB  
+    **Precision**: 4-bit quantized  
+    **Use case**: Recommended for consumer hardware
+
+    ```bash
+    huggingface-cli download \
+      mlx-community/Mistral-7B-Instruct-v0.3-4bit \
+      --local-dir ./models/Mistral-7B-4bit
+    ```
+  </Card>
+</CardGroup>
+
+### Model variants
+
+| Model | Parameters | Notes |
+|-------|------------|---------|
+| Mistral-7B-v0.1 | 7B | Original release |
+| Mistral-7B-v0.2 | 7B | Improved instruction following |
+| Mistral-7B-v0.3 | 7B | Latest version (recommended) |
+
+All variants available in both base and Instruct versions. Use Instruct for chat applications.
+
+## Performance
+
+### Benchmark results (Apple M3 Max)
+
+| Model | Memory | Tokens/sec (Prefill) | Tokens/sec (Decode) |
+|-------|--------|---------------------|---------------------|
+| Mistral-7B (bf16) | 14 GB | ~180 tok/s | 40 tok/s |
+| Mistral-7B (4-bit) | 4 GB | ~220 tok/s | 55 tok/s |
+
+4-bit quantization provides:
+- **3.5x less memory** (4 GB vs 14 GB)
+- **1.4x faster generation** (55 vs 40 tok/s)
+- Minimal quality degradation
+
+### Sliding window efficiency
+
+Mistral's 4096-token sliding window enables efficient long-context processing:
+
+| Context Length | Memory (bf16) | Memory (4-bit) | Speed |
+|----------------|---------------|----------------|-------|
+| 2K tokens | 14 GB | 4 GB | 40 tok/s |
+| 4K tokens | 15 GB | 4.5 GB | 38 tok/s |
+| 8K tokens | 16 GB | 5 GB | 35 tok/s |
+
+Memory grows linearly but slowly thanks to GQA and sliding window.
+
+## Mistral Instruct format
+
+Mistral Instruct models use a specific chat format:
+
+```rust
+// Single turn
+let prompt = "[INST] Your question here [/INST]";
+
+// Multi-turn conversation
+let prompt = "[INST] First question [/INST] First response [INST] Follow-up question [/INST]";
+```
+
+Always wrap user messages in `[INST]...[/INST]` tags for best results.
+
+## Converting models
+
+Convert from HuggingFace with quantization:
+
+```bash
+pip install mlx-lm
+
+# 4-bit quantization
+mlx_lm.convert --hf-path mistralai/Mistral-7B-Instruct-v0.3 -q
+
+# Without quantization
+mlx_lm.convert --hf-path mistralai/Mistral-7B-Instruct-v0.3
+```
+
+## Model configuration
+
+Mistral-7B configuration:
+
+```json
+{
+  "hidden_size": 4096,
+  "num_hidden_layers": 32,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 8,
+  "intermediate_size": 14336,
+  "sliding_window": 4096,
+  "vocab_size": 32000,
+  "rope_theta": 10000.0,
+  "rms_norm_eps": 1e-05
+}
+```
+
+Key parameters:
+- **GQA ratio**: 32:8 = 4:1 (4x KV cache reduction)
+- **Sliding window**: 4096 tokens
+- **Large intermediate**: 14336 dims (3.5× hidden size)
+
+## API reference
+
+### Loading functions
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model, Error>
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer, Error>
+```
+
+### Generation
+
+```rust
+pub struct Generate<C: KeyValueCache> {
+    // fields omitted
+}
+
+impl<C: KeyValueCache> Generate<C> {
+    pub fn new(
+        model: &mut Model,
+        cache: &mut Vec<C>,
+        temperature: f32,
+        prompt: &Array,
+    ) -> Self
+}
+```
+
+Iterator yielding tokens. Temperature 0.0 enables greedy sampling.
+
+### Re-exported types
+
+```rust
+pub use mlx_rs_core::{
+    KVCache, ConcatKeyValueCache, KeyValueCache,
+    create_attention_mask, scaled_dot_product_attention,
+    initialize_rope, AttentionMask, SdpaMask,
+};
+```
+
+## Benchmarking
+
+Run the benchmark example:
+
+```bash
+cargo run --release --example benchmark_mistral -- \
+    ./models/Mistral-7B-4bit --iterations 10
+```
+
+This measures:
+- Model load time
+- Prompt processing speed
+- Token generation speed
+- Memory usage
+
+## Troubleshooting
+
+### Unexpected output format
+
+Make sure to use Mistral Instruct format:
+
+```rust
+// ❌ Wrong
+let prompt = "What is the capital of France?";
+
+// ✅ Correct
+let prompt = "[INST] What is the capital of France? [/INST]";
+```
+
+### Out of memory
+
+Mistral-7B (bf16) requires 16GB+ memory. Solutions:
+1. Use 4-bit quantized model
+2. Close other applications
+3. Reduce max generation length
+
+### Slow generation speed
+
+- Use `--release` build mode (essential for performance)
+- Verify Metal GPU is active in Activity Monitor
+- Use 4-bit model for faster inference
+- Update to latest macOS for Metal optimizations
+
+## Related models
+
+- [Mixtral](/llm/mixtral) - MoE variant with 8x7B experts
+- [Qwen3-8B](/llm/qwen3) - Alternative 8B dense model

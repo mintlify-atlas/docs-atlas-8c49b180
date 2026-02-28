@@ -1,0 +1,434 @@
+---
+title: GPT-SoVITS
+description: Few-shot voice cloning with 4x real-time synthesis on Apple Silicon
+---
+
+GPT-SoVITS is a pure Rust implementation of voice cloning with MLX acceleration. Clone any voice with just a few seconds of reference audio and generate natural-sounding speech at 4x real-time speed.
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Few-shot voice cloning" icon="user-voice">
+    Clone voices with just seconds of reference audio
+  </Card>
+  <Card title="Mixed language support" icon="language">
+    Natural handling of mixed Chinese-English text
+  </Card>
+  <Card title="High performance" icon="bolt">
+    4x real-time synthesis on Apple Silicon
+  </Card>
+  <Card title="Pure Rust" icon="rust">
+    No Python dependencies at inference time
+  </Card>
+</CardGroup>
+
+## First-time setup
+
+Download and convert all required model weights (~2GB):
+
+```bash
+python scripts/setup_models.py
+```
+
+This automatically:
+1. Installs Python dependencies (torch CPU, safetensors, transformers)
+2. Downloads pretrained checkpoints from HuggingFace
+3. Converts to MLX-compatible safetensors format
+4. Places output in `~/.dora/models/primespeech/gpt-sovits-mlx/`
+
+<Note>
+After setup, Python is no longer required. All inference runs in pure Rust.
+</Note>
+
+### Model files
+
+The setup creates the following structure:
+
+```
+~/.dora/models/primespeech/gpt-sovits-mlx/
+├── doubao_mixed_gpt_new.safetensors         # GPT T2S model
+├── doubao_mixed_sovits_new.safetensors      # SoVITS VITS decoder
+├── hubert.safetensors                       # CNHubert audio encoder
+├── bert.safetensors                         # Chinese BERT
+└── chinese-roberta-tokenizer/
+    └── tokenizer.json                       # BERT tokenizer
+```
+
+## Quick start
+
+### Basic voice cloning
+
+<CodeGroup>
+```rust Rust API
+use gpt_sovits_mlx::VoiceCloner;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create voice cloner with default models
+    let mut cloner = VoiceCloner::with_defaults()?;
+
+    // Set reference audio for voice cloning
+    cloner.set_reference_audio("reference.wav")?;
+
+    // Synthesize speech
+    let audio = cloner.synthesize("Hello, world!")?;
+
+    // Save output
+    cloner.save_wav(&audio, "output.wav")?;
+
+    Ok(())
+}
+```
+
+```bash CLI
+# Basic voice cloning
+cargo run --release --example voice_clone -- \
+    --mlx-vits --ref ./audio/reference.wav "Hello, this is a voice clone test."
+
+# With custom model directory
+cargo run --release --example voice_clone -- \
+    --model-dir ./models/gpt-sovits \
+    --mlx-vits --ref ./audio/speaker.wav "你好，世界！"
+```
+</CodeGroup>
+
+### Mixed language synthesis
+
+GPT-SoVITS automatically detects and handles mixed language text:
+
+```rust
+// Mixed Chinese-English works automatically
+let audio = cloner.synthesize("你好 world! 今天天气 is great!")?;
+```
+
+## Voice cloning workflow
+
+<Steps>
+  <Step title="Prepare reference audio">
+    Record or select a clean audio sample (WAV format, 5-30 seconds recommended). The reference audio should:
+    - Be clear with minimal background noise
+    - Contain the target speaker's voice
+    - Be in WAV format (any sample rate, will be resampled automatically)
+  </Step>
+
+  <Step title="Initialize voice cloner">
+    Create a voice cloner instance with default or custom configuration:
+
+    ```rust
+    use gpt_sovits_mlx::{VoiceCloner, VoiceClonerConfig};
+
+    // With default config
+    let mut cloner = VoiceCloner::with_defaults()?;
+
+    // Or with custom config
+    let config = VoiceClonerConfig {
+        gpt_path: "./models/gpt.safetensors".into(),
+        sovits_path: "./models/sovits.safetensors".into(),
+        ..Default::default()
+    };
+    let mut cloner = VoiceCloner::new(config)?;
+    ```
+  </Step>
+
+  <Step title="Set reference audio">
+    Configure the reference audio for voice cloning:
+
+    ```rust
+    // Zero-shot mode (no reference text)
+    cloner.set_reference_audio("reference.wav")?;
+
+    // Few-shot mode (with reference text, better quality)
+    cloner.set_reference_audio_with_text(
+        "reference.wav",
+        "This is the text spoken in the reference audio"
+    )?;
+    ```
+
+    <Note>
+    Few-shot mode requires the CNHubert model and produces better quality by using the reference transcript.
+    </Note>
+  </Step>
+
+  <Step title="Synthesize speech">
+    Generate audio from text:
+
+    ```rust
+    let audio = cloner.synthesize("Text to synthesize")?;
+
+    // Get audio data
+    let samples: Vec<f32> = audio.samples();
+    let sample_rate = audio.sample_rate();
+    let duration = audio.duration_secs();
+    ```
+  </Step>
+
+  <Step title="Save or play audio">
+    Output the synthesized audio:
+
+    ```rust
+    // Save to WAV file
+    cloner.save_wav(&audio, "output.wav")?;
+
+    // Or play directly
+    cloner.play_blocking(&audio)?;
+    ```
+  </Step>
+</Steps>
+
+## Architecture
+
+GPT-SoVITS combines a GPT-style autoregressive model with a VITS vocoder:
+
+```
+                    GPT-SoVITS Pipeline
+
+Text Input          Reference Audio
+    │                    │
+    ▼                    ▼
+┌─────────┐        ┌─────────────┐
+│  G2PW   │        │  CNHubert   │
+│ (ONNX)  │        │   Encoder   │
+└────┬────┘        └──────┬──────┘
+     │                    │
+     ▼                    ▼
+┌─────────┐        ┌─────────────┐
+│  BERT   │        │ Quantizer   │
+│Embedding│        │  (Codes)    │
+└────┬────┘        └──────┬──────┘
+     │                    │
+     └────────┬───────────┘
+              │
+              ▼
+       ┌─────────────┐
+       │  GPT T2S    │  (Text-to-Semantic)
+       │  Decoder    │
+       └──────┬──────┘
+              │
+              ▼
+       ┌─────────────┐
+       │   SoVITS    │  (VITS Vocoder)
+       │   Decoder   │
+       └──────┬──────┘
+              │
+              ▼
+         Audio Output
+```
+
+### Components
+
+| Module | Description |
+|--------|-------------|
+| `audio` | WAV I/O, resampling, mel spectrogram |
+| `cache` | KV cache for autoregressive generation |
+| `text` | G2PW, pinyin, language detection, phoneme processing |
+| `models/t2s` | GPT text-to-semantic transformer |
+| `models/vits` | SoVITS VITS vocoder |
+| `models/hubert` | CNHubert audio encoder |
+| `models/bert` | Chinese BERT embeddings |
+| `inference` | T2S generation with cache |
+| `voice_clone` | High-level voice cloning API |
+
+## Advanced usage
+
+### Custom configuration
+
+<CodeGroup>
+```rust Custom models
+use gpt_sovits_mlx::{VoiceCloner, VoiceClonerConfig};
+
+let config = VoiceClonerConfig {
+    gpt_path: "./models/custom_gpt.safetensors".into(),
+    sovits_path: "./models/custom_sovits.safetensors".into(),
+    temperature: 1.0,
+    top_k: 15,
+    top_p: 0.8,
+    repetition_penalty: 1.35,
+    ..Default::default()
+};
+
+let mut cloner = VoiceCloner::new(config)?;
+```
+
+```rust Pre-computed codes
+// Use pre-computed semantic codes for better quality
+cloner.set_reference_with_precomputed_codes(
+    "reference.wav",
+    "Reference text",
+    "codes.bin"
+)?;
+
+let audio = cloner.synthesize("Hello!")?;
+```
+
+```rust Interactive mode
+// Interactive mode example
+cargo run --release --example voice_clone -- --interactive
+```
+</CodeGroup>
+
+### Text preprocessing
+
+Control how text is converted to phonemes:
+
+```rust
+use gpt_sovits_mlx::text::{preprocess_text, Language};
+
+// Automatic language detection
+let (phonemes, language) = preprocess_text("你好 world!")?;
+
+// Explicit language
+let phonemes = preprocess_text_with_language(
+    "你好",
+    Language::Chinese
+)?;
+```
+
+### Audio I/O operations
+
+Low-level audio processing:
+
+```rust
+use gpt_sovits_mlx::audio::{load_wav, save_wav, resample};
+
+// Load audio file
+let (samples, sample_rate) = load_wav("input.wav")?;
+
+// Resample to target rate
+let samples_16k = resample(&samples, sample_rate, 16000);
+
+// Save audio
+save_wav(&samples, 24000, "output.wav")?;
+```
+
+## Performance benchmarks
+
+Measured on Apple M3 Max for 2 seconds of audio output:
+
+<AccordionGroup>
+  <Accordion title="Inference breakdown">
+    | Stage | Time | Notes |
+    |-------|------|-------|
+    | Reference processing | ~50ms | CNHubert + quantization |
+    | BERT embedding | ~20ms | Text encoding |
+    | T2S generation | ~100ms | GPT decoding (variable) |
+    | VITS synthesis | ~50ms | Audio generation |
+    | **Total** | **~220ms** | For 2s audio output |
+
+    **Real-time factor**: ~4x (generates 2s audio in 500ms)
+  </Accordion>
+
+  <Accordion title="Memory usage">
+    - Model loading: ~2GB GPU memory
+    - Runtime peak: ~3GB GPU memory
+    - CPU memory: ~1GB
+  </Accordion>
+
+  <Accordion title="Quality metrics">
+    - Sample rate: 24kHz output
+    - Bit depth: 32-bit float (saved as 16-bit PCM)
+    - Latency: ~220ms for typical utterance
+    - Voice similarity: High (comparable to reference)
+  </Accordion>
+</AccordionGroup>
+
+## CLI reference
+
+The `voice_clone` example provides a full CLI interface:
+
+```bash
+# Basic synthesis
+voice_clone "text to speak"
+
+# Use configured voice preset
+voice_clone "text" --voice NAME
+
+# Custom reference audio
+voice_clone "text" --ref FILE
+
+# Few-shot with reference text
+voice_clone "text" --ref-text "text"
+
+# Pre-computed codes
+voice_clone "text" --codes FILE.bin
+
+# Save to file
+voice_clone "text" --output FILE.wav
+
+# Interactive mode
+voice_clone --interactive
+
+# List available voices
+voice_clone --list-voices
+
+# Force MLX VITS backend
+voice_clone "text" --mlx-vits
+```
+
+### Voice configuration
+
+Create `~/.OminiX/models/voices.json` to configure voice presets:
+
+```json
+{
+  "default_voice": "doubao",
+  "models_base_path": "~/.OminiX/models",
+  "voices": {
+    "doubao": {
+      "ref_audio": "gpt-sovits-mlx/reference.wav",
+      "ref_text": "参考音频的文本",
+      "speed_factor": 1.0
+    },
+    "custom": {
+      "ref_audio": "/path/to/reference.wav",
+      "ref_text": "Reference text",
+      "aliases": ["my-voice", "alt-name"]
+    }
+  }
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Model setup fails">
+    Make sure you have Python 3.10+ installed and run:
+    ```bash
+    python scripts/setup_models.py
+    ```
+    
+    If download fails, check your internet connection and HuggingFace access.
+  </Accordion>
+
+  <Accordion title="Audio quality issues">
+    - Use clean reference audio with minimal background noise
+    - Try few-shot mode with reference text for better quality
+    - Use pre-computed codes extracted from Python for best results:
+      ```bash
+      python scripts/extract_prompt_semantic.py voice.wav codes.bin
+      voice_clone "text" --ref voice.wav --ref-text "text" --codes codes.bin
+      ```
+  </Accordion>
+
+  <Accordion title="Performance is slow">
+    - Make sure you're building with `--release` flag
+    - Check GPU utilization with Activity Monitor
+    - Verify MLX is using Metal GPU (not CPU fallback)
+  </Accordion>
+
+  <Accordion title="Mixed language sounds wrong">
+    The G2PW model automatically handles mixed Chinese-English. If pronunciation is incorrect:
+    - Verify the text is properly formatted
+    - Check that language detection is working correctly
+    - Try explicit language specification if needed
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="TTS overview" icon="arrow-left" href="/tts/overview">
+    Back to TTS overview
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API
+  </Card>
+</CardGroup>

@@ -1,0 +1,511 @@
+---
+title: Moxin-7B VLM
+description: Run Moxin-7B vision-language model inference on Apple Silicon with MLX
+---
+
+Moxin-7B is a powerful vision-language model that combines DINOv2 and SigLIP vision encoders with a Mistral-7B language decoder. Written in pure Rust with MLX, it provides efficient multimodal inference on Apple Silicon with support for 8-bit quantization.
+
+## Architecture
+
+Moxin-7B uses a dual-encoder vision system fused with a Mistral-7B decoder:
+
+```
+Image (224×224)
+  ├─ DINOv2 ViT-L/14      → [B, 256, 1024]
+  └─ SigLIP ViT-SO400M/14 → [B, 256, 1152]
+              │ concat
+        [B, 256, 2176]
+              │ FusedMLPProjector (3-layer MLP with GELU)
+        [B, 256, 4096]   (256 visual tokens)
+              │
+  BOS + [visual tokens] + text tokens
+              │ Mistral-7B decoder (36 layers, GQA 32Q/8KV)
+        logits → autoregressive generation
+```
+
+### Vision encoders
+
+<AccordionGroup>
+  <Accordion title="DINOv2 ViT-L/14" icon="eye">
+    - **Layers**: 24 transformer blocks
+    - **Embedding dim**: 1024
+    - **Patch size**: 14×14
+    - **Features**: CLS token + 4 register tokens + LayerScale
+    - **Normalization**: ImageNet statistics (mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    
+    DINOv2 is trained with self-supervised learning on ImageNet, providing strong semantic understanding of visual content.
+  </Accordion>
+  
+  <Accordion title="SigLIP ViT-SO400M/14" icon="images">
+    - **Layers**: 27 transformer blocks
+    - **Embedding dim**: 1152
+    - **Patch size**: 14×14
+    - **Features**: No CLS token, all patch tokens used
+    - **Normalization**: Unit normalization (mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    
+    SigLIP is trained with contrastive learning on image-text pairs, providing vision-language alignment.
+  </Accordion>
+</AccordionGroup>
+
+### Language decoder
+
+The Mistral-7B decoder provides the language generation capabilities:
+
+- **Parameters**: 7B
+- **Layers**: 36 transformer blocks
+- **Hidden size**: 4096
+- **Attention**: Grouped Query Attention (32 query heads, 8 KV heads)
+- **Context**: Rotary Position Embeddings (RoPE) with base 10000
+- **Vocabulary**: 32,064 tokens
+
+## Installation
+
+Moxin-7B is included in the OminiX source distribution:
+
+```toml
+[dependencies]
+moxin-vlm-mlx = { path = "path/to/moxin-vlm-mlx" }
+mlx-rs = { features = ["metal", "accelerate"] }
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download the model">
+    Download Moxin-7B weights from Hugging Face:
+    
+    ```bash
+    huggingface-cli download moxin-org/moxin-llm-7b \
+        --local-dir ~/.OminiX/models/moxin-vlm-7b
+    ```
+  </Step>
+  
+  <Step title="Run basic inference">
+    Generate a description from an image:
+    
+    ```bash
+    cargo run --release --example generate -- \
+        --model ~/.OminiX/models/moxin-vlm-7b \
+        --image photo.jpg \
+        --prompt "Describe the image."
+    ```
+  </Step>
+  
+  <Step title="Enable quantization">
+    Use 8-bit quantization for faster inference:
+    
+    ```bash
+    cargo run --release --example generate -- \
+        --model ~/.OminiX/models/moxin-vlm-7b \
+        --image photo.jpg \
+        --prompt "What objects are visible?" \
+        --quantize 8
+    ```
+  </Step>
+</Steps>
+
+## Usage
+
+### Basic example
+
+Here's a complete example showing how to use Moxin-7B as a library:
+
+<CodeGroup>
+
+```rust Basic inference
+use moxin_vlm_mlx::{load_model, load_tokenizer, normalize_dino, normalize_siglip, Generate, KVCache};
+use mlx_rs::Array;
+use image::imageops::FilterType;
+
+// Load model and tokenizer
+let mut vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+let tokenizer = load_tokenizer("~/.OminiX/models/moxin-vlm-7b")?;
+
+// Load and preprocess image to 224×224
+let img = image::open("photo.jpg")?;
+let img = img.resize_exact(224, 224, FilterType::CatmullRom);
+let rgb = img.to_rgb8();
+
+// Convert to [1, 224, 224, 3] float32 tensor in [0, 1]
+let pixels: Vec<f32> = rgb
+    .pixels()
+    .flat_map(|p| p.0.iter().map(|&v| v as f32 / 255.0))
+    .collect();
+let tensor = Array::from_slice(&pixels, &[1, 224, 224, 3]);
+
+// Normalize for each encoder
+let dino_img = normalize_dino(&tensor)?;
+let siglip_img = normalize_siglip(&tensor)?;
+
+// Format prompt (Prismatic "Pure" format)
+let prompt_text = format!("In: {}\nOut:", "Describe this image.");
+
+// Tokenize with BOS token
+let encoding = tokenizer.encode(prompt_text.as_str(), true)?;
+let input_ids = Array::from_iter(
+    encoding.get_ids().iter().map(|&id| id as i32),
+    &[1, encoding.get_ids().len() as i32],
+);
+
+// Generate tokens
+let mut cache: Vec<KVCache> = Vec::new();
+let generator = Generate::new(
+    &mut vlm,
+    &mut cache,
+    0.0,  // temperature (0 = greedy)
+    dino_img,
+    siglip_img,
+    input_ids,
+);
+
+let eos_token_id = 2u32; // </s>
+let mut generated = Vec::new();
+
+for token_result in generator.take(256) {
+    let token = token_result?;
+    let token_id = token.item::<u32>();
+    
+    if token_id == eos_token_id {
+        break;
+    }
+    
+    generated.push(token_id);
+    
+    // Decode and print incrementally
+    let text = tokenizer.decode(&generated, true)?;
+    print!("{}", text);
+}
+```
+
+```rust With quantization
+use moxin_vlm_mlx::load_model;
+
+// Load model
+let vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+
+// Quantize to 8-bit with group_size=64
+let mut vlm = vlm.quantize(64, 8)?;
+
+// Use as normal - quantization is transparent
+// ... (same as basic example)
+```
+
+```rust Save quantized model
+use moxin_vlm_mlx::load_model;
+
+// Load and quantize
+let vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+let vlm = vlm.quantize(64, 8)?;
+
+// Save quantized weights
+mlx_rs::save_safetensors(
+    &vlm.to_weights()?,
+    "~/.OminiX/models/moxin-vlm-7b-8bit/model.safetensors"
+)?;
+```
+
+</CodeGroup>
+
+### Image preprocessing
+
+Moxin-7B requires images to be preprocessed differently for each encoder:
+
+```rust
+use moxin_vlm_mlx::{normalize_dino, normalize_siglip};
+use mlx_rs::Array;
+
+// Input: [1, 224, 224, 3] float32 tensor in [0, 1]
+let tensor = Array::from_slice(&pixels, &[1, 224, 224, 3]);
+
+// DINOv2: ImageNet normalization
+let dino_img = normalize_dino(&tensor)?;
+// Applies: (x - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
+
+// SigLIP: Unit normalization
+let siglip_img = normalize_siglip(&tensor)?;
+// Applies: (x - 0.5) / 0.5
+```
+
+<Note>
+  Both encoders expect 224×224 RGB images in NHWC format (MLX standard). Make sure to resize images to exactly 224×224 before normalization.
+</Note>
+
+### Prompt formatting
+
+Moxin-7B uses the Prismatic "Pure" prompt format:
+
+```rust
+let prompt = format!("In: {}\nOut:", user_query);
+```
+
+Examples:
+- `"In: Describe this image.\nOut:"`
+- `"In: What objects are visible in this scene?\nOut:"`
+- `"In: Is there a dog in this image?\nOut:"`
+
+### Sampling strategies
+
+<CodeGroup>
+
+```rust Greedy sampling
+let generator = Generate::new(
+    &mut vlm,
+    &mut cache,
+    0.0,  // temperature = 0 for greedy
+    dino_img,
+    siglip_img,
+    input_ids,
+);
+```
+
+```rust Temperature sampling
+let generator = Generate::new(
+    &mut vlm,
+    &mut cache,
+    0.7,  // temperature for sampling
+    dino_img,
+    siglip_img,
+    input_ids,
+);
+```
+
+</CodeGroup>
+
+## Performance
+
+Typical performance on Apple Silicon (M3 Max, 36 GPU cores):
+
+### Prefill (vision + prompt)
+
+| Configuration | Time | Throughput |
+|---------------|------|------------|
+| BF16 (no quantization) | ~250ms | 1024 tokens (256 visual + text) |
+| INT8 quantization | ~200ms | 1024 tokens (256 visual + text) |
+
+### Decode (token generation)
+
+| Configuration | Tokens/second | Memory Usage |
+|---------------|---------------|-------------|
+| BF16 (no quantization) | 35-45 tok/s | ~14GB |
+| INT8 quantization | 55-70 tok/s | ~7GB |
+| INT4 quantization | 75-95 tok/s | ~4GB |
+
+<Note>
+  Performance varies based on prompt length, generated length, and hardware. These benchmarks are from the `generate` example with default settings.
+</Note>
+
+### Memory breakdown
+
+- **DINOv2 ViT-L/14**: ~300MB (kept in BF16)
+- **SigLIP ViT-SO400M/14**: ~450MB (kept in BF16)
+- **FusedMLPProjector**: ~50MB (kept in BF16)
+- **Mistral-7B decoder**: ~13GB (BF16) / ~6.5GB (INT8) / ~3.5GB (INT4)
+
+## Quantization
+
+Moxin-7B supports efficient quantization of the language decoder:
+
+### Why quantize?
+
+- **Reduced memory**: 8-bit uses ~50% less memory, 4-bit uses ~70% less
+- **Faster inference**: Quantized models run 1.5-2x faster on Apple Silicon
+- **Quality**: 8-bit quantization has minimal quality loss
+
+### Quantization options
+
+```rust
+let vlm = vlm.quantize(group_size, bits)?;
+```
+
+**Parameters:**
+- `group_size`: Quantization group size (typically 64 or 128)
+- `bits`: Bit width (4 or 8)
+
+**Recommended configurations:**
+- **8-bit, group_size=64**: Best balance of speed, memory, and quality
+- **4-bit, group_size=128**: Maximum speed and memory savings, slight quality loss
+
+### What gets quantized?
+
+Only the Mistral-7B decoder is quantized:
+
+- ✅ Attention projections (Q, K, V, O)
+- ✅ MLP layers (gate, up, down)
+- ✅ LM head
+- ❌ Vision encoders (DINOv2, SigLIP) - kept in BF16
+- ❌ Projector - kept in BF16
+
+<Note>
+  Vision encoders are kept in BF16 because they only run once during prefill and have dimension sizes that aren't cleanly divisible by common group sizes.
+</Note>
+
+## Command-line examples
+
+The `moxin-vlm-mlx` crate includes several command-line examples:
+
+### generate
+
+Basic image captioning and visual question answering:
+
+```bash
+cargo run --release --example generate -- \
+    --model ~/.OminiX/models/moxin-vlm-7b \
+    --image photo.jpg \
+    --prompt "Describe the image in detail." \
+    --temp 0.0 \
+    --max-tokens 256 \
+    --quantize 8
+```
+
+**Arguments:**
+- `--model`: Path to model directory
+- `--image`: Path to input image (any format supported by `image` crate)
+- `--prompt`: Text prompt (will be formatted as "In: {'{prompt}'}\nOut:")
+- `--temp`: Sampling temperature (0.0 = greedy, higher = more random)
+- `--max-tokens`: Maximum tokens to generate (default: 256)
+- `--quantize`: Quantization bits (0 = none, 4 or 8)
+
+### save_quantized
+
+Quantize and save model weights for faster loading:
+
+```bash
+cargo run --release --example save_quantized -- \
+    --model ~/.OminiX/models/moxin-vlm-7b \
+    --output ~/.OminiX/models/moxin-vlm-7b-8bit \
+    --bits 8 \
+    --group-size 64
+```
+
+### server
+
+OpenAI-compatible HTTP server for VLM inference:
+
+```bash
+cargo run --release --example server -- \
+    --model ~/.OminiX/models/moxin-vlm-7b \
+    --port 8080 \
+    --quantize 8
+```
+
+Make requests to `/v1/chat/completions` with base64-encoded images.
+
+## API reference
+
+### Core functions
+
+<ParamField path="load_model" type="fn(path: impl AsRef<Path>) -> Result<MoxinVLM>">
+  Load Moxin-7B model from a directory containing `model.safetensors` and `config.json`.
+  
+  Supports both sharded weights (`model.safetensors.index.json`) and single-file weights.
+</ParamField>
+
+<ParamField path="load_tokenizer" type="fn(path: impl AsRef<Path>) -> Result<Tokenizer>">
+  Load the tokenizer from `tokenizer.json` in the model directory.
+</ParamField>
+
+<ParamField path="normalize_dino" type="fn(img: &Array) -> Result<Array>">
+  Normalize image for DINOv2 encoder using ImageNet statistics.
+  
+  Input: `[B, 224, 224, 3]` float32 in `[0, 1]`
+</ParamField>
+
+<ParamField path="normalize_siglip" type="fn(img: &Array) -> Result<Array>">
+  Normalize image for SigLIP encoder using unit normalization.
+  
+  Input: `[B, 224, 224, 3]` float32 in `[0, 1]`
+</ParamField>
+
+### MoxinVLM methods
+
+<ParamField path="forward" type="fn(&mut self, dino_image, siglip_image, input_ids, cache) -> Result<Array>">
+  Full VLM forward pass: encode image + text → logits.
+  
+  This is used during the prefill phase when processing the initial image and prompt.
+</ParamField>
+
+<ParamField path="decode_token" type="fn(&mut self, token, cache) -> Result<Array>">
+  Text-only decode for single token generation (uses KV cache).
+  
+  This is used during the decode phase for fast autoregressive generation.
+</ParamField>
+
+<ParamField path="quantize" type="fn(self, group_size: i32, bits: i32) -> Result<Self>">
+  Quantize the LLM decoder to reduce memory and improve speed.
+  
+  Only quantizes the Mistral-7B decoder; vision encoders remain in BF16.
+</ParamField>
+
+### Generate iterator
+
+<ParamField path="Generate::new" type="fn(vlm, cache, temp, dino_image, siglip_image, input_ids) -> Generate">
+  Create a token generator for VLM inference.
+  
+  Returns an iterator that yields tokens one at a time, handling both prefill and decode phases automatically.
+</ParamField>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Out of memory errors" icon="memory">
+    Try quantizing the model to reduce memory usage:
+    
+    ```rust
+    let vlm = vlm.quantize(64, 8)?;  // 8-bit quantization
+    ```
+    
+    Or use 4-bit quantization for even lower memory:
+    
+    ```rust
+    let vlm = vlm.quantize(128, 4)?;  // 4-bit quantization
+    ```
+  </Accordion>
+  
+  <Accordion title="Slow inference" icon="turtle">
+    Enable quantization for faster inference:
+    
+    ```bash
+    --quantize 8
+    ```
+    
+    8-bit quantization typically provides 1.5-2x speedup with minimal quality loss.
+  </Accordion>
+  
+  <Accordion title="Image format issues" icon="image">
+    Ensure images are:
+    - Exactly 224×224 pixels
+    - RGB format (3 channels)
+    - Float32 values in [0, 1] range
+    - NHWC layout (batch, height, width, channels)
+    
+    ```rust
+    let img = img.resize_exact(224, 224, FilterType::CatmullRom);
+    let rgb = img.to_rgb8();
+    ```
+  </Accordion>
+  
+  <Accordion title="Model loading failures" icon="folder-open">
+    Verify the model directory contains:
+    - `model.safetensors` or `model.safetensors.index.json` + shard files
+    - `config.json`
+    - `tokenizer.json`
+    
+    Download again if files are missing:
+    
+    ```bash
+    huggingface-cli download moxin-org/moxin-llm-7b \
+        --local-dir ~/.OminiX/models/moxin-vlm-7b
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="VLM overview" icon="images" href="/vlm/overview">
+    Learn more about vision-language models
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

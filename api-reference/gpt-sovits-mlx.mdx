@@ -1,0 +1,458 @@
+---
+title: GPT-SoVITS MLX
+description: Voice cloning with GPT-SoVITS on Apple Silicon
+---
+
+# GPT-SoVITS MLX
+
+Pure Rust implementation of GPT-SoVITS with MLX acceleration for Apple Silicon. Enables few-shot voice cloning with just a few seconds of reference audio.
+
+## Features
+
+- **Few-shot voice cloning**: Clone any voice with just a few seconds of reference audio
+- **Mixed Chinese-English**: Natural handling of mixed language text
+- **High performance**: 4x realtime synthesis on Apple Silicon
+- **Pure Rust**: No Python dependencies at runtime
+
+## Performance
+
+On Apple Silicon (M-series):
+- Model loading: ~50ms
+- Synthesis: ~4x realtime (generates 20s audio in 5s)
+- Memory: ~2GB for all models
+
+## Installation
+
+```bash
+cargo add gpt-sovits-mlx
+```
+
+## Quick start
+
+```rust
+use gpt_sovits_mlx::VoiceCloner;
+
+let mut cloner = VoiceCloner::with_defaults()?;
+cloner.set_reference_audio("/path/to/reference.wav")?;
+let audio = cloner.synthesize("你好，世界！")?;
+cloner.play(&audio)?;
+```
+
+## VoiceCloner
+
+Main API for voice cloning with GPT-SoVITS.
+
+### VoiceCloner::new
+
+Create a new voice cloner with configuration.
+
+```rust
+pub fn new(config: VoiceClonerConfig) -> Result<Self, Error>
+```
+
+<ParamField path="config" type="VoiceClonerConfig" required>
+  Configuration with model paths and sampling parameters
+</ParamField>
+
+<ResponseField name="return" type="Result<VoiceCloner, Error>">
+  Voice cloner instance with loaded models
+</ResponseField>
+
+### VoiceCloner::with_defaults
+
+Create with default configuration.
+
+```rust
+pub fn with_defaults() -> Result<Self, Error>
+```
+
+<ResponseField name="return" type="Result<VoiceCloner, Error>">
+  Voice cloner with default model paths from ~/.OminiX/models/gpt-sovits-mlx
+</ResponseField>
+
+### VoiceCloner::set_reference_audio
+
+Set reference audio for voice cloning (zero-shot mode).
+
+```rust
+pub fn set_reference_audio(&mut self, path: impl AsRef<Path>) -> Result<(), Error>
+```
+
+<ParamField path="path" type="impl AsRef<Path>" required>
+  Path to reference audio file (WAV format)
+</ParamField>
+
+<ResponseField name="return" type="Result<(), Error>">
+  Success if reference loaded and mel spectrogram computed
+</ResponseField>
+
+Zero-shot mode uses only the reference audio mel spectrogram for voice style.
+
+### VoiceCloner::set_reference_audio_with_text
+
+Set reference audio with transcript for few-shot mode.
+
+```rust
+pub fn set_reference_audio_with_text(
+    &mut self,
+    audio_path: impl AsRef<Path>,
+    text: &str,
+) -> Result<(), Error>
+```
+
+<ParamField path="audio_path" type="impl AsRef<Path>" required>
+  Path to reference audio file
+</ParamField>
+
+<ParamField path="text" type="&str" required>
+  Transcript of the reference audio
+</ParamField>
+
+<ResponseField name="return" type="Result<(), Error>">
+  Success if reference loaded and HuBERT semantic codes extracted
+</ResponseField>
+
+Few-shot mode extracts semantic tokens from the reference audio using HuBERT, which provides better voice cloning quality than zero-shot mode.
+
+### VoiceCloner::set_reference_with_precomputed_codes
+
+Set reference using pre-computed prompt semantic codes.
+
+```rust
+pub fn set_reference_with_precomputed_codes(
+    &mut self,
+    audio_path: impl AsRef<Path>,
+    text: &str,
+    codes_path: impl AsRef<Path>,
+) -> Result<(), Error>
+```
+
+<ParamField path="audio_path" type="impl AsRef<Path>" required>
+  Path to reference audio file (for mel spectrogram)
+</ParamField>
+
+<ParamField path="text" type="&str" required>
+  Transcript of the reference audio
+</ParamField>
+
+<ParamField path="codes_path" type="impl AsRef<Path>" required>
+  Path to binary file containing i32 codes (little-endian) or .npy file
+</ParamField>
+
+<ResponseField name="return" type="Result<(), Error>">
+  Success if reference and codes loaded
+</ResponseField>
+
+Use this when the Rust HuBERT produces poor results. You can extract prompt semantic codes using Python and load them here.
+
+### VoiceCloner::synthesize
+
+Synthesize speech from text.
+
+```rust
+pub fn synthesize(&mut self, text: &str) -> Result<AudioOutput, Error>
+```
+
+<ParamField path="text" type="&str" required>
+  Text to synthesize (up to 10,000 characters)
+</ParamField>
+
+<ResponseField name="return" type="Result<AudioOutput, Error>">
+  Generated audio with samples, sample rate, duration, and token count
+</ResponseField>
+
+Text is automatically split at punctuation marks and each segment is processed separately for better quality. Long segments are further chunked to prevent T2S attention degradation.
+
+### VoiceCloner::synthesize_with_options
+
+Synthesize speech with timeout and cancellation support.
+
+```rust
+pub fn synthesize_with_options(
+    &mut self,
+    text: &str,
+    options: SynthesisOptions,
+) -> Result<AudioOutput, Error>
+```
+
+<ParamField path="text" type="&str" required>
+  Text to synthesize
+</ParamField>
+
+<ParamField path="options" type="SynthesisOptions" required>
+  Synthesis options (timeout, cancellation token, speed override)
+</ParamField>
+
+<ResponseField name="return" type="Result<AudioOutput, Error>">
+  Generated audio or error if cancelled/timed out
+</ResponseField>
+
+```rust
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+let cancel = Arc::new(AtomicBool::new(false));
+let options = SynthesisOptions {
+    timeout: Some(Duration::from_secs(30)),
+    cancel_token: Some(cancel.clone()),
+    ..Default::default()
+};
+
+// Call cancel.store(true, Ordering::Relaxed) to cancel
+let audio = cloner.synthesize_with_options("Hello", options)?;
+```
+
+### VoiceCloner::synthesize_from_tokens
+
+Synthesize audio from external semantic tokens.
+
+```rust
+pub fn synthesize_from_tokens(
+    &mut self,
+    text: &str,
+    tokens: &[i32],
+) -> Result<AudioOutput, Error>
+```
+
+<ParamField path="text" type="&str" required>
+  Text to get phoneme IDs
+</ParamField>
+
+<ParamField path="tokens" type="&[i32]" required>
+  Pre-computed semantic tokens
+</ParamField>
+
+<ResponseField name="return" type="Result<AudioOutput, Error>">
+  Generated audio
+</ResponseField>
+
+This bypasses token generation and directly vocodes the provided tokens. Useful for comparing Rust VITS with Python's semantic tokens.
+
+### VoiceCloner::few_shot_available
+
+Check if few-shot mode is available.
+
+```rust
+pub fn few_shot_available(&self) -> bool
+```
+
+<ResponseField name="return" type="bool">
+  True if HuBERT model is loaded
+</ResponseField>
+
+### VoiceCloner::is_few_shot_mode
+
+Check if currently in few-shot mode.
+
+```rust
+pub fn is_few_shot_mode(&self) -> bool
+```
+
+<ResponseField name="return" type="bool">
+  True if prompt semantic codes and reference text are set
+</ResponseField>
+
+## Types
+
+### VoiceClonerConfig
+
+Configuration for voice cloner.
+
+```rust
+pub struct VoiceClonerConfig {
+    pub t2s_weights: String,
+    pub bert_weights: String,
+    pub bert_tokenizer: String,
+    pub vits_weights: String,
+    pub vits_pretrained_base: Option<String>,
+    pub hubert_weights: String,
+    pub sample_rate: u32,        // 32000
+    pub top_k: i32,              // 15
+    pub top_p: f32,              // 1.0
+    pub temperature: f32,        // 1.0
+    pub repetition_penalty: f32, // 1.2
+    pub noise_scale: f32,        // 0.5
+    pub speed: f32,              // 1.0
+    pub vits_onnx_path: Option<String>,
+    pub use_mlx_vits: bool,      // false
+    pub use_gpu_mel: bool,       // true
+}
+```
+
+**Default model directory**: Uses `$GPT_SOVITS_MODEL_DIR` if set, otherwise `~/.OminiX/models/gpt-sovits-mlx`.
+
+### AudioOutput
+
+Generated audio output.
+
+```rust
+pub struct AudioOutput {
+    pub samples: Vec<f32>,      // Raw audio samples (-1.0 to 1.0)
+    pub sample_rate: u32,       // Sample rate (32000)
+    pub duration: f32,          // Duration in seconds
+    pub num_tokens: usize,      // Number of semantic tokens
+}
+```
+
+### AudioOutput::duration_secs
+
+Get duration in seconds.
+
+```rust
+pub fn duration_secs(&self) -> f32
+```
+
+<ResponseField name="return" type="f32">
+  Duration calculated from samples.len() / sample_rate
+</ResponseField>
+
+### AudioOutput::to_i16_samples
+
+Convert to i16 samples for WAV output.
+
+```rust
+pub fn to_i16_samples(&self) -> Vec<i16>
+```
+
+<ResponseField name="return" type="Vec<i16>">
+  Samples converted to 16-bit PCM, clamped to [-1, 1]
+</ResponseField>
+
+### AudioOutput::apply_fade_in
+
+Apply fade-in to reduce initial noise artifacts.
+
+```rust
+pub fn apply_fade_in(&mut self, fade_ms: f32)
+```
+
+<ParamField path="fade_ms" type="f32" required>
+  Fade-in duration in milliseconds (default: 50ms)
+</ParamField>
+
+### AudioOutput::trim_start
+
+Trim audio from the start to remove initial artifacts.
+
+```rust
+pub fn trim_start(&mut self, trim_ms: f32)
+```
+
+<ParamField path="trim_ms" type="f32" required>
+  Duration to trim in milliseconds
+</ParamField>
+
+### SynthesisOptions
+
+Options for synthesis with timeout and cancellation support.
+
+```rust
+pub struct SynthesisOptions {
+    pub timeout: Option<Duration>,
+    pub cancel_token: Option<Arc<AtomicBool>>,
+    pub max_tokens_per_chunk: Option<usize>,
+    pub speed_override: Option<f32>,
+}
+```
+
+### SynthesisOptions::with_timeout
+
+Create options with a timeout.
+
+```rust
+pub fn with_timeout(timeout: Duration) -> Self
+```
+
+<ParamField path="timeout" type="Duration" required>
+  Maximum time allowed for synthesis
+</ParamField>
+
+<ResponseField name="return" type="SynthesisOptions">
+  Options with timeout set
+</ResponseField>
+
+### SynthesisOptions::with_cancel_token
+
+Create options with a cancellation token.
+
+```rust
+pub fn with_cancel_token(token: Arc<AtomicBool>) -> Self
+```
+
+<ParamField path="token" type="Arc<AtomicBool>" required>
+  Cancellation token - set to true to cancel synthesis
+</ParamField>
+
+<ResponseField name="return" type="SynthesisOptions">
+  Options with cancel token set
+</ResponseField>
+
+## Text preprocessing
+
+### preprocess_text
+
+Preprocess text to phonemes.
+
+```rust
+pub fn preprocess_text(text: &str) -> (Array, Vec<String>, Vec<i32>, String)
+```
+
+<ParamField path="text" type="&str" required>
+  Input text in Chinese or English
+</ParamField>
+
+<ResponseField name="return" type="(Array, Vec<String>, Vec<i32>, String)">
+  Tuple of (phoneme_ids, phonemes, word2ph, normalized_text)
+</ResponseField>
+
+### Language
+
+Supported languages.
+
+```rust
+pub enum Language {
+    Chinese,
+    English,
+}
+```
+
+## Model files
+
+Required files in model directory:
+
+1. **T2S weights**: `doubao_mixed_gpt_new.safetensors`
+2. **BERT weights**: `bert.safetensors`
+3. **BERT tokenizer**: `chinese-roberta-tokenizer/tokenizer.json`
+4. **VITS weights**: `doubao_mixed_sovits_new.safetensors`
+5. **HuBERT weights**: `hubert.safetensors` (for few-shot mode)
+6. **ONNX VITS** (optional): `vits.onnx` (recommended for best quality)
+
+## Environment variables
+
+- `GPT_SOVITS_MODEL_DIR` - Override default model directory
+
+## Modes
+
+### Zero-shot mode
+
+Uses only reference audio mel spectrogram for voice style:
+
+```rust
+cloner.set_reference_audio("/path/to/reference.wav")?;
+let audio = cloner.synthesize("你好，世界！")?;
+```
+
+### Few-shot mode
+
+Uses reference audio + transcript for stronger conditioning via HuBERT:
+
+```rust
+cloner.set_reference_audio_with_text(
+    "/path/to/reference.wav",
+    "这是参考音频的文本内容"
+)?;
+let audio = cloner.synthesize("你好，世界！")?;
+```
+
+Few-shot mode provides better quality but requires the reference audio transcript.

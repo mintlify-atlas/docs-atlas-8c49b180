@@ -1,0 +1,300 @@
+---
+title: Qwen3-ASR MLX
+description: Speech recognition with Qwen3-ASR on Apple Silicon
+---
+
+# Qwen3-ASR MLX
+
+Qwen3-ASR speech recognition on Apple Silicon using MLX. Supports all Qwen3-ASR model sizes (0.6B, 1.7B) with architecture fully driven by config.
+
+## Architecture
+
+- **Audio Encoder (AuT)**: Conv2d frontend + Transformer with windowed attention
+- **Projector**: Linear projection from encoder dim to decoder dim
+- **Text Decoder**: Qwen3 LLM with GQA and Q/K RMSNorm
+
+## Installation
+
+```bash
+cargo add qwen3-asr-mlx
+```
+
+## Quick start
+
+```rust
+use qwen3_asr_mlx::{Qwen3ASR, default_model_path};
+
+let mut model = Qwen3ASR::load(default_model_path())?;
+let text = model.transcribe("audio.wav")?;
+println!("{}", text);
+```
+
+## Functions
+
+### default_model_path
+
+Get the default model path.
+
+```rust
+pub fn default_model_path() -> std::path::PathBuf
+```
+
+Resolution order:
+1. `QWEN3_ASR_MODEL_PATH` environment variable
+2. `~/.OminiX/models/qwen3-asr-1.7b`
+
+<ResponseField name="return" type="PathBuf">
+  Default model directory path
+</ResponseField>
+
+### load_model
+
+Load a Qwen3-ASR model from a directory.
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Qwen3ASR, Error>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Path to model directory containing config.json and safetensors weights
+</ParamField>
+
+<ResponseField name="return" type="Result<Qwen3ASR, Error>">
+  Loaded Qwen3ASR model instance
+</ResponseField>
+
+## Qwen3ASR
+
+Main model struct for Qwen3-ASR speech recognition.
+
+### Qwen3ASR::load
+
+Load model from directory.
+
+```rust
+pub fn load(model_dir: impl AsRef<Path>) -> Result<Self, Error>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Directory containing config.json and model safetensors files
+</ParamField>
+
+<ResponseField name="return" type="Result<Qwen3ASR, Error>">
+  Loaded model with audio encoder, text decoder, and tokenizer
+</ResponseField>
+
+### Qwen3ASR::transcribe
+
+Transcribe audio file.
+
+```rust
+pub fn transcribe(&mut self, audio_path: impl AsRef<Path>) -> Result<String, Error>
+```
+
+<ParamField path="audio_path" type="impl AsRef<Path>" required>
+  Path to audio file (WAV format)
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed text in Chinese by default
+</ResponseField>
+
+### Qwen3ASR::transcribe_with_language
+
+Transcribe audio file with specified language.
+
+```rust
+pub fn transcribe_with_language(
+    &mut self,
+    audio_path: impl AsRef<Path>,
+    language: &str,
+) -> Result<String, Error>
+```
+
+<ParamField path="audio_path" type="impl AsRef<Path>" required>
+  Path to audio file (WAV format)
+</ParamField>
+
+<ParamField path="language" type="&str" required>
+  Language hint (e.g., "Chinese", "English", "Japanese", "Korean", "French", "German", "Spanish", "Russian")
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed text in specified language
+</ResponseField>
+
+### Qwen3ASR::transcribe_samples
+
+Transcribe audio samples (16kHz mono f32).
+
+```rust
+pub fn transcribe_samples(
+    &mut self,
+    samples: &[f32],
+    language: &str,
+) -> Result<String, Error>
+```
+
+<ParamField path="samples" type="&[f32]" required>
+  Audio samples at 16kHz, mono, f32 format
+</ParamField>
+
+<ParamField path="language" type="&str" required>
+  Language hint for transcription
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed text
+</ResponseField>
+
+For audio longer than 30 seconds, automatically uses chunked processing.
+
+### Qwen3ASR::transcribe_samples_chunked
+
+Transcribe long audio by splitting into chunks.
+
+```rust
+pub fn transcribe_samples_chunked(
+    &mut self,
+    samples: &[f32],
+    language: &str,
+    config: &SamplingConfig,
+    chunk_duration_secs: f32,
+) -> Result<String, Error>
+```
+
+<ParamField path="samples" type="&[f32]" required>
+  Audio samples at 16kHz
+</ParamField>
+
+<ParamField path="language" type="&str" required>
+  Language hint
+</ParamField>
+
+<ParamField path="config" type="&SamplingConfig" required>
+  Sampling configuration for generation
+</ParamField>
+
+<ParamField path="chunk_duration_secs" type="f32" required>
+  Duration of each chunk in seconds (e.g., 30.0)
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Concatenated transcription from all chunks
+</ResponseField>
+
+Each chunk is processed independently with its own KV cache.
+
+### Qwen3ASR::transcribe_samples_with_config
+
+Transcribe with full configuration.
+
+```rust
+pub fn transcribe_samples_with_config(
+    &mut self,
+    samples: &[f32],
+    language: &str,
+    config: &SamplingConfig,
+) -> Result<String, Error>
+```
+
+<ParamField path="samples" type="&[f32]" required>
+  Audio samples at 16kHz
+</ParamField>
+
+<ParamField path="language" type="&str" required>
+  Language hint
+</ParamField>
+
+<ParamField path="config" type="&SamplingConfig" required>
+  Sampling configuration (temperature, max_tokens)
+</ParamField>
+
+<ResponseField name="return" type="Result<String, Error>">
+  Transcribed text
+</ResponseField>
+
+## Types
+
+### Qwen3ASRConfig
+
+Model configuration loaded from config.json.
+
+```rust
+pub struct Qwen3ASRConfig {
+    pub audio_config: AudioEncoderConfig,
+    pub text_config: QwenConfig,
+    pub audio_token_id: i32,
+    pub audio_start_token_id: i32,
+    pub audio_end_token_id: i32,
+    pub support_languages: Vec<String>,
+    pub quantization: Option<QuantizationConfig>,
+}
+```
+
+### SamplingConfig
+
+Sampling configuration for text generation.
+
+```rust
+pub struct SamplingConfig {
+    pub temperature: f32,
+    pub max_tokens: usize,
+}
+```
+
+**Default values:**
+- `temperature: 0.0` (greedy decoding)
+- `max_tokens: 8192`
+
+### AudioConfig
+
+Audio preprocessing configuration.
+
+```rust
+pub struct AudioConfig {
+    pub sample_rate: i32,
+    pub n_fft: i32,
+    pub hop_length: i32,
+    pub n_mels: i32,
+}
+```
+
+### Error
+
+Error type for Qwen3-ASR operations.
+
+```rust
+pub enum Error {
+    ModelLoad(String),
+    Tokenizer(String),
+    Audio(String),
+    Inference(String),
+    Weight(String),
+    Io(std::io::Error),
+}
+```
+
+## Supported languages
+
+- Chinese
+- English
+- Cantonese
+- Japanese
+- Korean
+- French
+- German
+- Spanish
+- Russian
+
+## Model files
+
+Required files in model directory:
+- `config.json` - Model configuration
+- `model.safetensors` or `model-00001-of-*.safetensors` - Model weights
+- `tokenizer.json` or `vocab.json` + `merges.txt` - Tokenizer
+- `tokenizer_config.json` - Tokenizer configuration
+
+## Environment variables
+
+- `QWEN3_ASR_MODEL_PATH` - Override default model path

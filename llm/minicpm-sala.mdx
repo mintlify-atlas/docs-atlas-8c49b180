@@ -1,0 +1,467 @@
+---
+title: MiniCPM-SALA models
+description: Million-token context with hybrid attention architecture
+---
+
+MiniCPM-SALA is a 9B parameter hybrid attention model that achieves million-token context on consumer GPUs by combining 25% sparse attention (InfLLM-v2) for local details with 75% linear attention (Lightning Attention) for global efficiency.
+
+## Features
+
+| Feature | Value |
+|---------|-------|
+| Parameters | 9B |
+| Max context | 1M+ tokens |
+| Inference speed | 3.5× faster than Qwen3-8B at 256K context |
+| Memory efficiency | Runs on M3 Max, RTX 5090, A6000D |
+| License | Apache-2.0 |
+
+### Architecture highlights
+
+- **Hybrid attention**: 25% sparse + 75% lightning attention layers
+- **Custom Metal kernels**: Optimized GLA (Gated Linear Attention) implementation
+- **Self-speculative decoding**: Draft from first 8 layers for faster generation
+- **OpenAI-compatible API**: Drop-in replacement for OpenAI server
+- **8-bit quantization**: 9.6 GB model size with 28 tok/s decode speed
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+minicpm-sala-mlx = { path = "../minicpm-sala-mlx" }
+mlx-rs = "0.18"
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download model">
+    Download 8-bit quantized model (recommended):
+
+    ```bash
+    huggingface-cli download moxin-org/MiniCPM4-SALA-9B-8bit-mlx \
+        --local-dir ./models/MiniCPM-SALA-8bit
+    ```
+  </Step>
+
+  <Step title="Run text generation">
+    ```bash
+    cargo run --release -p minicpm-sala-mlx --example generate -- \
+        ./models/MiniCPM-SALA-8bit "Explain quantum entanglement in simple terms."
+    ```
+  </Step>
+
+  <Step title="Use in your code">
+    ```rust
+    use minicpm_sala_mlx::{
+        load_model, load_tokenizer, create_layer_caches,
+        get_model_args, sample, is_stop_token, format_chat_prompt,
+    };
+    use mlx_rs::ops::indexing::IndexOp;
+
+    // Load model
+    let model_args = get_model_args("./models/MiniCPM-SALA-8bit")?;
+    let tokenizer = load_tokenizer("./models/MiniCPM-SALA-8bit")?;
+    let mut model = load_model("./models/MiniCPM-SALA-8bit")?;
+    let mut caches = create_layer_caches(&model_args);
+
+    // Format chat prompt
+    let prompt = format_chat_prompt("You are a helpful assistant.", "Hello!");
+    let encoding = tokenizer.encode(prompt.as_str(), true)?;
+    let input = mlx_rs::Array::from_slice(
+        &encoding.get_ids().iter().map(|&t| t as i32).collect::<Vec<_>>(),
+        &[1, encoding.get_ids().len() as i32],
+    );
+
+    // Prefill
+    let logits = model.forward(&input, &mut caches)?;
+    let last_logits = logits.index((.., -1, ..));
+    let mut token = sample(&last_logits, 0.7)?;
+
+    // Decode
+    for _ in 0..256 {
+        let token_id = token.item::<u32>();
+        if is_stop_token(token_id) { break; }
+
+        print!("{}", tokenizer.decode(&[token_id], true)?);
+
+        let input = token.reshape(&[1, 1])?;
+        let logits = model.forward(&input, &mut caches)?;
+        let last_logits = logits.index((.., -1, ..));
+        token = sample(&last_logits, 0.7)?;
+    }
+    ```
+  </Step>
+</Steps>
+
+## Examples
+
+### Text generation
+
+Basic generation with chat template:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example generate -- \
+    ./models/MiniCPM-SALA-8bit "Explain quantum entanglement in simple terms."
+```
+
+Options:
+- `--max-tokens N`: Generate up to N tokens (default: 256)
+- `--temperature T`: Sampling temperature (default: 0.7, use 0 for greedy)
+- `--raw`: Skip chat template, use raw completion
+- `--system "..."`: Custom system prompt
+- `--no-think`: Hide `<think>...</think>` reasoning blocks
+
+### Interactive chat
+
+Multi-turn conversation:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example chat -- \
+    ./models/MiniCPM-SALA-8bit --no-think
+```
+
+Commands:
+- `clear`: Reset conversation history
+- `quit` or `exit`: Exit chat
+
+### Batched inference
+
+Process multiple prompts in parallel:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example batch_generate -- \
+    ./models/MiniCPM-SALA-8bit
+```
+
+Demonstrates efficient batched generation for multiple independent prompts.
+
+### Self-speculative decoding
+
+Use first 8 layers as draft model:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example speculative_generate -- \
+    ./models/MiniCPM-SALA-8bit
+```
+
+Accelerates generation by drafting tokens with partial model then verifying with full model.
+
+### Long context test
+
+Needle-in-a-haystack evaluation:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example needle_test -- \
+    ./models/MiniCPM-SALA-8bit --context-len 32000 --depth 0.5
+```
+
+Tests retrieval of specific facts buried in long filler text.
+
+### OpenAI-compatible API server
+
+Start HTTP server:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example server -- \
+    --model ./models/MiniCPM-SALA-8bit --port 8080 --no-think
+```
+
+Server options:
+- `--port N`: Listen on port N (default: 8080)
+- `--temperature T`: Default temperature (default: 0.7)
+- `--max-tokens N`: Default max tokens (default: 2048)
+- `--no-think`: Strip `<think>...</think>` from responses
+- `--models-dir PATH`: Directory for managed models (default: `~/.ominix/models`)
+
+#### API endpoints
+
+<CardGroup cols={2}>
+  <Card title="Chat completions" icon="comment">
+    **POST** `/v1/chat/completions`
+    
+    OpenAI-compatible chat endpoint
+  </Card>
+
+  <Card title="List models" icon="list">
+    **GET** `/v1/models`
+    
+    List available models with metadata
+  </Card>
+
+  <Card title="Download model" icon="download">
+    **POST** `/v1/models/download`
+    
+    Download model from HuggingFace
+  </Card>
+
+  <Card title="Delete model" icon="trash">
+    **DELETE** `/v1/models/{id}`
+    
+    Remove downloaded model
+  </Card>
+</CardGroup>
+
+#### Chat completion example
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minicpm-sala-9b",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is the capital of France?"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 256
+  }'
+```
+
+Response:
+
+```json
+{
+  "id": "chatcmpl-189409a7a2804800",
+  "object": "chat.completion",
+  "model": "minicpm-sala-9b",
+  "choices": [{
+    "index": 0,
+    "message": {
+      "role": "assistant",
+      "content": "The capital of France is Paris."
+    },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 32,
+    "completion_tokens": 90,
+    "total_tokens": 122
+  }
+}
+```
+
+#### Model management
+
+```bash
+# List models
+curl http://localhost:8080/v1/models
+
+# Download from HuggingFace
+curl -X POST http://localhost:8080/v1/models/download \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "moxin-org/MiniCPM4-SALA-9B-8bit-mlx"}'
+
+# Delete model
+curl -X DELETE http://localhost:8080/v1/models/MiniCPM4-SALA-9B-8bit-mlx
+```
+
+## Supported models
+
+<CardGroup cols={3}>
+  <Card title="8-bit (recommended)" icon="microchip">
+    **Size**: 9.6 GB  
+    **Prefill**: 443 tok/s  
+    **Decode**: 28 tok/s  
+    **Use case**: Best balance of speed and quality
+
+    ```bash
+    huggingface-cli download \
+      moxin-org/MiniCPM4-SALA-9B-8bit-mlx \
+      --local-dir ./models/MiniCPM-SALA-8bit
+    ```
+  </Card>
+
+  <Card title="4-bit (fastest)" icon="bolt">
+    **Size**: 5.4 GB  
+    **Prefill**: 260 tok/s  
+    **Decode**: 35 tok/s  
+    **Use case**: Memory-constrained systems
+  </Card>
+
+  <Card title="fp16 (highest quality)" icon="server">
+    **Size**: 18 GB  
+    **Prefill**: 314 tok/s  
+    **Decode**: 3.6 tok/s  
+    **Use case**: Batch processing, not interactive
+  </Card>
+</CardGroup>
+
+<Warning>
+  **fp16 not recommended for interactive use**
+  
+  The fp16 model has 3.6 tok/s decode speed, which is too slow for chat. Use 8-bit or 4-bit instead.
+</Warning>
+
+## Performance
+
+### Throughput (Apple M3 Max, 128 GB)
+
+| Variant | Size | Prefill | Decode |
+|---------|------|---------|--------|
+| fp16 | 18 GB | 0.4 – 313.9 tok/s | 3.5 – 3.6 tok/s |
+| 8-bit | 9.6 GB | 4.7 – 442.6 tok/s | 27.3 – 28.1 tok/s |
+| 4-bit | 5.4 GB | 2.2 – 260.3 tok/s | 34.4 – 35.6 tok/s |
+
+Prefill speed scales with prompt length (low = 2 tokens, high = ~900 tokens).  
+Decode speed is steady-state autoregressive generation.
+
+### Speed vs Qwen3-8B (both 8-bit)
+
+MiniCPM-SALA (Rust/mlx-rs) vs Qwen3-8B (Python/mlx-lm):
+
+| Context | SALA Prefill | Qwen3 Prefill | SALA Decode | Qwen3 Decode |
+|---------|--------------|---------------|-------------|---------------|
+| 4K | 309 tok/s | 488 tok/s | 26 tok/s | 35 tok/s |
+| 8K | 325 tok/s | 493 tok/s | 25 tok/s | 33 tok/s |
+| 16K | 325 tok/s | 417 tok/s | 23 tok/s | 25 tok/s |
+| **32K** | **350 tok/s** | **333 tok/s** | **23 tok/s** | **18 tok/s** |
+| **64K** | **220 tok/s** | OOM | **19 tok/s** | — |
+| **128K** | **192 tok/s** | OOM | **9 tok/s** | — |
+
+**Key insights**:
+- At short contexts (< 16K), Qwen3-8B is faster due to optimized dense GQA
+- At **32K, SALA overtakes Qwen3** in both prefill and decode
+- Beyond 32K, **Qwen3's KV cache grows too large** while SALA continues to 128K+
+- SALA's advantage grows with context length (75% lightning attention layers use O(1) state)
+
+### Needle-in-a-haystack results
+
+Retrieval of specific fact in long filler text (8-bit, greedy):
+
+| Context | Depth | Found? | Prefill Speed | Prefill Time |
+|---------|-------|--------|---------------|-------------|
+| 4K | 50% | ✅ YES | 309 tok/s | 13s |
+| 8K | 25% | ✅ YES | 325 tok/s | 25s |
+| 16K | 25% | ✅ YES | 325 tok/s | 49s |
+| 32K | 95% | ✅ YES | 350 tok/s | 92s |
+| 64K | 95% | ✅ YES | 220 tok/s | 293s |
+| **128K** | **95%** | **✅ YES** | **192 tok/s** | **671s (11 min)** |
+| 256K | 95% | ❌ NO | 276 tok/s | 934s (16 min) |
+
+**Findings**:
+- Reliable retrieval within **sliding window** (last ~2K tokens) and **init region** (first ~8K tokens)
+- Middle-region retrieval depends on InfLLM-v2 sparse selection (can miss individual facts in repetitive text)
+- 128K prefill in ~11 min on M3 Max
+- Decode speed degrades at very long contexts (9 tok/s at 128K vs 28 tok/s at 4K)
+
+## Hybrid attention architecture
+
+MiniCPM-SALA alternates two attention types:
+
+### Sparse attention layers (25%)
+
+**InfLLM-v2**: Selects top-K blocks from history based on attention scores
+- Local window: Always attends to last ~2048 tokens
+- Top-K blocks: Dynamically selects 64 most relevant 64-token blocks from earlier context
+- Good for **precise retrieval** of specific facts
+
+### Lightning attention layers (75%)
+
+**GLA (Gated Linear Attention)**: Recurrent state updated per token
+- O(1) memory per layer (fixed-size state, not growing with context)
+- Linear complexity: O(n) instead of O(n²)
+- Good for **global understanding** and summarization
+
+This combination achieves:
+- Million-token context capability
+- Faster inference than dense attention at long contexts
+- Better quality than pure linear attention
+
+## Converting models
+
+Save quantized weights from fp16 checkpoint:
+
+```bash
+cargo run --release -p minicpm-sala-mlx --example save_quantized -- \
+    ./models/MiniCPM-SALA --bits 8 --output ./models/MiniCPM-SALA-8bit
+```
+
+Supported quantization:
+- `--bits 8`: 8-bit (recommended)
+- `--bits 4`: 4-bit (faster, lower quality)
+
+## API reference
+
+### Loading functions
+
+```rust
+pub fn get_model_args(model_dir: impl AsRef<Path>) -> Result<ModelArgs>
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model>
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer>
+pub fn create_layer_caches(args: &ModelArgs) -> Vec<LayerCache>
+```
+
+### Generation utilities
+
+```rust
+pub fn sample(logits: &Array, temperature: f32) -> Result<Array>
+pub fn is_stop_token(token_id: u32) -> bool
+pub fn format_chat_prompt(system: &str, user: &str) -> String
+```
+
+### Think filter
+
+```rust
+pub struct ThinkFilter {
+    // fields omitted
+}
+
+impl ThinkFilter {
+    pub fn new(no_think: bool) -> Self
+    pub fn next(&mut self, full_text: &str) -> String
+}
+```
+
+Filters `<think>...</think>` blocks from output when `no_think = true`.
+
+## Troubleshooting
+
+### Slow decode speed
+
+MiniCPM-SALA decode speed is limited by:
+1. **Sparse layers**: Scan growing KV cache (slower at long contexts)
+2. **Lightning layers**: Fixed overhead per token
+
+Solutions:
+- Use 4-bit model for 30% faster decode (35 vs 28 tok/s)
+- Keep context under 32K for best speed
+- Consider batched inference for multiple prompts
+
+### Out of memory
+
+MiniCPM-SALA-9B (8-bit) requires 12GB+ memory. Solutions:
+1. Use 4-bit model (5.4 GB vs 9.6 GB)
+2. Close other applications
+3. Reduce max context length
+
+### Missing facts in middle of long context
+
+InfLLM-v2 sparse selection may miss individual facts in repetitive filler text. This is expected behavior. For critical retrieval:
+- Place important info near start or end of context
+- Use explicit markers or section headers
+- Increase `topk` parameter in model config (requires retraining)
+
+### Think blocks not filtered
+
+Make sure to pass `--no-think` flag:
+
+```bash
+# ✅ Correct
+cargo run --release --example generate -- ./model --no-think
+
+# ❌ Wrong (will show <think> blocks)
+cargo run --release --example generate -- ./model
+```
+
+## Related models
+
+- [Qwen3-8B](/llm/qwen3) - Dense 8B model, faster at short contexts
+- [GLM-4-9B](/llm/glm4) - Similar size, unique architecture
+
+## References
+
+- [HuggingFace Model](https://huggingface.co/openbmb/MiniCPM-SALA) - Upstream PyTorch implementation
+- [GitHub Repository](https://github.com/OpenBMB/MiniCPM) - Source code and docs
+- [Technical Report](https://arxiv.org/abs/2026.xxxxx) - Architecture details

@@ -1,0 +1,553 @@
+---
+title: Moxin VLM MLX
+description: Vision-language model inference API for Moxin-7B on Apple Silicon
+---
+
+## Overview
+
+The `moxin-vlm-mlx` crate provides Vision-Language Model inference for Moxin-7B on Apple Silicon using MLX. It implements a dual-backbone vision encoder architecture with DINOv2 and SigLIP, coupled with a Mistral-7B decoder for multimodal understanding.
+
+### Architecture
+
+```text
+Image (224x224)
+  |-> DINOv2 ViT-L/14 -> [B, 256, 1024]
+  |-> SigLIP ViT-SO400M -> [B, 256, 1152]
+             | concat
+       [B, 256, 2176]
+             | FusedMLPProjector
+       [B, 256, 4096]  (256 visual tokens)
+             |
+  BOS + [visual tokens] + text tokens
+             | Mistral-7B decoder (36 layers)
+       logits -> autoregressive generation
+```
+
+## Model loading
+
+### load_model
+
+Loads the Moxin-7B VLM from a directory containing safetensors and config.json.
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<MoxinVLM>
+```
+
+<ParamField path="model_dir" type="impl AsRef<Path>" required>
+  Path to the directory containing model files (safetensors and config.json)
+</ParamField>
+
+<ResponseField name="return" type="Result<MoxinVLM>">
+  Returns the loaded MoxinVLM model or an error if loading fails
+</ResponseField>
+
+The function automatically detects:
+- Sharded vs single safetensors files
+- Weight key prefix variants for vision and language models
+- Model configuration from config.json or uses defaults
+
+## MoxinVLM
+
+The main VLM model struct combining vision encoders and language decoder.
+
+### Fields
+
+<ResponseField name="dino" type="ViTEncoder">
+  DINOv2 ViT-Large/14 vision encoder (24 layers, 1024-dim)
+</ResponseField>
+
+<ResponseField name="siglip" type="ViTEncoder">
+  SigLIP ViT-SO400M/14 vision encoder (27 layers, 1152-dim)
+</ResponseField>
+
+<ResponseField name="projector" type="FusedMLPProjector">
+  3-layer MLP projecting fused vision features (2176-dim) to LLM space (4096-dim)
+</ResponseField>
+
+<ResponseField name="embed_tokens" type="nn::Embedding">
+  Token embedding layer for the language model
+</ResponseField>
+
+<ResponseField name="layers" type="Vec<LLMBlock>">
+  Mistral-7B decoder transformer blocks (default 36 layers)
+</ResponseField>
+
+<ResponseField name="norm" type="nn::RmsNorm">
+  Final RMS normalization layer
+</ResponseField>
+
+<ResponseField name="lm_head" type="MaybeQuantized<nn::Linear>">
+  Language model head for logit prediction
+</ResponseField>
+
+<ResponseField name="config" type="MistralConfig">
+  Model configuration
+</ResponseField>
+
+### forward
+
+Full VLM forward pass: encode image + text to logits.
+
+```rust
+pub fn forward<C: KeyValueCache + Default>(
+    &mut self,
+    dino_image: &Array,
+    siglip_image: &Array,
+    input_ids: &Array,
+    cache: &mut Vec<C>,
+) -> Result<Array>
+```
+
+<ParamField path="dino_image" type="&Array" required>
+  Image array [B, 224, 224, 3] in NHWC format, ImageNet-normalized (use `normalize_dino`)
+</ParamField>
+
+<ParamField path="siglip_image" type="&Array" required>
+  Image array [B, 224, 224, 3] in NHWC format, unit-normalized (use `normalize_siglip`)
+</ParamField>
+
+<ParamField path="input_ids" type="&Array" required>
+  Token IDs [B, seq_len] including BOS token
+</ParamField>
+
+<ParamField path="cache" type="&mut Vec<C>" required>
+  Key-value cache for attention layers
+</ParamField>
+
+<ResponseField name="return" type="Result<Array>">
+  Logits array for next token prediction
+</ResponseField>
+
+### decode_token
+
+Text-only decode for a single token with KV caching.
+
+```rust
+pub fn decode_token<C: KeyValueCache + Default>(
+    &mut self,
+    token: &Array,
+    cache: &mut Vec<C>,
+) -> Result<Array>
+```
+
+<ParamField path="token" type="&Array" required>
+  Token array [B] or [B, 1] to decode
+</ParamField>
+
+<ParamField path="cache" type="&mut Vec<C>" required>
+  Key-value cache for attention layers
+</ParamField>
+
+<ResponseField name="return" type="Result<Array>">
+  Logits array for next token prediction
+</ResponseField>
+
+### quantize
+
+Quantizes the LLM decoder linear layers while keeping vision encoders and projector in BF16.
+
+```rust
+pub fn quantize(self, group_size: i32, bits: i32) -> Result<Self>
+```
+
+<ParamField path="group_size" type="i32" required>
+  Group size for quantization (e.g., 64, 128)
+</ParamField>
+
+<ParamField path="bits" type="i32" required>
+  Bit width for quantization (e.g., 4, 8)
+</ParamField>
+
+<ResponseField name="return" type="Result<Self>">
+  Quantized model instance
+</ResponseField>
+
+Only the Mistral-7B decoder is quantized since it dominates memory and compute. Vision encoders have dimensions that aren't cleanly divisible by common group sizes, and they only run once during prefill.
+
+## Image preprocessing
+
+### normalize_dino
+
+Normalizes an image array for DINOv2 using ImageNet statistics.
+
+```rust
+pub fn normalize_dino(img: &Array) -> Result<Array>
+```
+
+<ParamField path="img" type="&Array" required>
+  Image array [B, H, W, 3] with float values in range [0, 1]
+</ParamField>
+
+<ResponseField name="return" type="Result<Array>">
+  Normalized image array using mean=[0.485, 0.456, 0.406] and std=[0.229, 0.224, 0.225]
+</ResponseField>
+
+### normalize_siglip
+
+Normalizes an image array for SigLIP using unit normalization.
+
+```rust
+pub fn normalize_siglip(img: &Array) -> Result<Array>
+```
+
+<ParamField path="img" type="&Array" required>
+  Image array [B, H, W, 3] with float values in range [0, 1]
+</ParamField>
+
+<ResponseField name="return" type="Result<Array>">
+  Normalized image array using mean=[0.5, 0.5, 0.5] and std=[0.5, 0.5, 0.5]
+</ResponseField>
+
+## Generation
+
+### Generate
+
+Iterator-based token generator for VLM inference.
+
+```rust
+pub struct Generate<'a, C> {
+    vlm: &'a mut MoxinVLM,
+    cache: &'a mut Vec<C>,
+    temp: f32,
+    state: GenerateState,
+}
+```
+
+#### new
+
+Creates a new generator for VLM inference.
+
+```rust
+pub fn new(
+    vlm: &'a mut MoxinVLM,
+    cache: &'a mut Vec<C>,
+    temp: f32,
+    dino_image: Array,
+    siglip_image: Array,
+    input_ids: Array,
+) -> Self
+```
+
+<ParamField path="vlm" type="&'a mut MoxinVLM" required>
+  Mutable reference to the VLM model
+</ParamField>
+
+<ParamField path="cache" type="&'a mut Vec<C>" required>
+  Mutable reference to KV cache
+</ParamField>
+
+<ParamField path="temp" type="f32" required>
+  Sampling temperature (0.0 for greedy, higher for more randomness)
+</ParamField>
+
+<ParamField path="dino_image" type="Array" required>
+  DINOv2-normalized image array
+</ParamField>
+
+<ParamField path="siglip_image" type="Array" required>
+  SigLIP-normalized image array
+</ParamField>
+
+<ParamField path="input_ids" type="Array" required>
+  Input token IDs
+</ParamField>
+
+The generator implements `Iterator<Item = Result<Array>>` and yields tokens one at a time. The first call performs prefill (full forward pass), subsequent calls perform cached decode.
+
+### sample
+
+Samples the next token from logits using temperature-based sampling.
+
+```rust
+pub fn sample(logits: &Array, temp: f32) -> std::result::Result<Array, mlx_rs::error::Exception>
+```
+
+<ParamField path="logits" type="&Array" required>
+  Logits array from model output
+</ParamField>
+
+<ParamField path="temp" type="f32" required>
+  Sampling temperature (0.0 for argmax/greedy sampling)
+</ParamField>
+
+<ResponseField name="return" type="std::result::Result<Array, mlx_rs::error::Exception>">
+  Sampled token ID
+</ResponseField>
+
+## Vision encoder
+
+### ViTEncoder
+
+Vision Transformer encoder for processing images into patch features.
+
+#### forward
+
+Processes an image through the vision transformer.
+
+```rust
+pub fn forward(&mut self, x: &Array) -> Result<Array, Exception>
+```
+
+<ParamField path="x" type="&Array" required>
+  Image array [B, H, W, 3] in NHWC format
+</ParamField>
+
+<ResponseField name="return" type="Result<Array, Exception>">
+  Patch features [B, num_patches, embed_dim] from second-to-last transformer block
+</ResponseField>
+
+Extracts features from the second-to-last transformer block, strips CLS and register tokens, returning only patch features.
+
+#### quantize
+
+Quantizes all linear layers in the vision encoder.
+
+```rust
+pub fn quantize(self, group_size: i32, bits: i32) -> std::result::Result<Self, Exception>
+```
+
+<ParamField path="group_size" type="i32" required>
+  Group size for quantization
+</ParamField>
+
+<ParamField path="bits" type="i32" required>
+  Bit width for quantization
+</ParamField>
+
+<ResponseField name="return" type="std::result::Result<Self, Exception>">
+  Quantized encoder instance
+</ResponseField>
+
+### ViTConfig
+
+Configuration for Vision Transformer models.
+
+#### dinov2_large
+
+Returns configuration for DINOv2 ViT-Large/14 with 4 register tokens.
+
+```rust
+pub fn dinov2_large() -> Self
+```
+
+<ResponseField name="return" type="Self">
+  ViTConfig with embed_dim=1024, depth=24, num_heads=16, has_cls_token=true, num_registers=4, has_layer_scale=true
+</ResponseField>
+
+#### siglip_so400m
+
+Returns configuration for SigLIP ViT-SO400M/14.
+
+```rust
+pub fn siglip_so400m() -> Self
+```
+
+<ResponseField name="return" type="Self">
+  ViTConfig with embed_dim=1152, depth=27, num_heads=16, has_cls_token=false, num_registers=0, has_layer_scale=false
+</ResponseField>
+
+### load_vit_encoder
+
+Loads a ViT encoder from a weight map.
+
+```rust
+pub fn load_vit_encoder(
+    weights: &HashMap<String, Array>,
+    prefix: &str,
+    config: ViTConfig,
+) -> Result<ViTEncoder, Error>
+```
+
+<ParamField path="weights" type="&HashMap<String, Array>" required>
+  Weight dictionary containing model parameters
+</ParamField>
+
+<ParamField path="prefix" type="&str" required>
+  Key prefix for this encoder's weights
+</ParamField>
+
+<ParamField path="config" type="ViTConfig" required>
+  Encoder configuration
+</ParamField>
+
+<ResponseField name="return" type="Result<ViTEncoder, Error>">
+  Loaded ViT encoder instance
+</ResponseField>
+
+## Projector
+
+### FusedMLPProjector
+
+3-layer MLP with GELU activations for projecting fused vision features to LLM embedding space.
+
+```rust
+pub struct FusedMLPProjector {
+    pub fc1: MaybeQuantized<nn::Linear>,
+    pub fc2: MaybeQuantized<nn::Linear>,
+    pub fc3: MaybeQuantized<nn::Linear>,
+}
+```
+
+Maps fused DINOv2+SigLIP features (2176-dim) to LLM embedding space (4096-dim).
+
+#### quantize
+
+Quantizes all linear layers in the projector.
+
+```rust
+pub fn quantize(self, group_size: i32, bits: i32) -> Result<Self, Exception>
+```
+
+<ParamField path="group_size" type="i32" required>
+  Group size for quantization
+</ParamField>
+
+<ParamField path="bits" type="i32" required>
+  Bit width for quantization
+</ParamField>
+
+<ResponseField name="return" type="Result<Self, Exception>">
+  Quantized projector instance
+</ResponseField>
+
+### load_projector
+
+Loads projector weights from a weight map.
+
+```rust
+pub fn load_projector(
+    weights: &HashMap<String, Array>,
+    prefix: &str,
+) -> Result<FusedMLPProjector, Error>
+```
+
+<ParamField path="weights" type="&HashMap<String, Array>" required>
+  Weight dictionary containing model parameters
+</ParamField>
+
+<ParamField path="prefix" type="&str" required>
+  Key prefix for projector weights
+</ParamField>
+
+<ResponseField name="return" type="Result<FusedMLPProjector, Error>">
+  Loaded projector instance
+</ResponseField>
+
+## Configuration
+
+### VLMConfig
+
+Vision-language model configuration.
+
+<ResponseField name="text_config" type="Option<MistralConfig>">
+  Language model configuration
+</ResponseField>
+
+<ResponseField name="image_sizes" type="Vec<i32>">
+  Image dimensions (default: [224, 224])
+</ResponseField>
+
+<ResponseField name="image_token_index" type="i32">
+  Special token index for image placeholders (default: 32000)
+</ResponseField>
+
+### MistralConfig
+
+Mistral-7B decoder configuration.
+
+<ResponseField name="hidden_size" type="i32">
+  Hidden dimension size (default: 4096)
+</ResponseField>
+
+<ResponseField name="num_hidden_layers" type="i32">
+  Number of transformer layers (default: 36)
+</ResponseField>
+
+<ResponseField name="num_attention_heads" type="i32">
+  Number of attention heads (default: 32)
+</ResponseField>
+
+<ResponseField name="num_key_value_heads" type="i32">
+  Number of key-value heads for GQA (default: 8)
+</ResponseField>
+
+<ResponseField name="intermediate_size" type="i32">
+  FFN intermediate dimension (default: 14336)
+</ResponseField>
+
+<ResponseField name="vocab_size" type="i32">
+  Vocabulary size (default: 32064)
+</ResponseField>
+
+<ResponseField name="rms_norm_eps" type="f32">
+  RMS normalization epsilon (default: 1e-5)
+</ResponseField>
+
+<ResponseField name="rope_theta" type="f32">
+  RoPE base frequency (default: 10000.0)
+</ResponseField>
+
+<ResponseField name="tie_word_embeddings" type="bool">
+  Whether to tie input and output embeddings (default: false)
+</ResponseField>
+
+## Error handling
+
+### Error
+
+Error types for VLM operations.
+
+<ResponseField name="Mlx" type="mlx_rs::error::Exception">
+  MLX computation errors
+</ResponseField>
+
+<ResponseField name="MlxIo" type="mlx_rs::error::IoError">
+  MLX I/O errors
+</ResponseField>
+
+<ResponseField name="Io" type="std::io::Error">
+  Standard I/O errors
+</ResponseField>
+
+<ResponseField name="Json" type="serde_json::Error">
+  JSON parsing errors
+</ResponseField>
+
+<ResponseField name="Tokenizer" type="String">
+  Tokenizer-related errors
+</ResponseField>
+
+<ResponseField name="WeightNotFound" type="String">
+  Missing weight in model file
+</ResponseField>
+
+<ResponseField name="InvalidConfig" type="String">
+  Invalid configuration
+</ResponseField>
+
+## Re-exports
+
+The crate re-exports useful types from `mlx_rs_core`:
+
+```rust
+pub use mlx_rs_core::{
+    cache::{ConcatKeyValueCache, KVCache, KeyValueCache},
+    load_tokenizer,
+};
+```
+
+<ResponseField name="ConcatKeyValueCache" type="mlx_rs_core::cache::ConcatKeyValueCache">
+  Concatenation-based KV cache implementation
+</ResponseField>
+
+<ResponseField name="KVCache" type="mlx_rs_core::cache::KVCache">
+  Basic KV cache implementation
+</ResponseField>
+
+<ResponseField name="KeyValueCache" type="mlx_rs_core::cache::KeyValueCache">
+  KV cache trait
+</ResponseField>
+
+<ResponseField name="load_tokenizer" type="mlx_rs_core::load_tokenizer">
+  Tokenizer loading function
+</ResponseField>

@@ -1,0 +1,428 @@
+---
+title: Unified memory
+description: Understand how Apple Silicon's unified memory architecture enables efficient ML inference without CPU-GPU data transfers
+---
+
+## What is unified memory?
+
+Unified memory is a hardware architecture where the CPU and GPU share the same physical memory (DRAM) rather than having separate memory pools. On Apple Silicon, both processing units can directly access any memory address without copying data between different memory spaces.
+
+### Traditional GPU architecture (NVIDIA/AMD)
+
+```
+┌──────────────┐         ┌──────────────┐
+│     CPU      │         │     GPU      │
+│              │         │              │
+│  ┌────────┐  │         │  ┌────────┐  │
+│  │  Core  │  │         │  │  CUDA  │  │
+│  │  Core  │  │         │  │  Core  │  │
+│  │  Core  │  │         │  │  Core  │  │
+│  └────────┘  │         │  └────────┘  │
+└──────┬───────┘         └──────┬───────┘
+       │                        │
+       │                        │
+   ┌───▼────┐              ┌───▼────┐
+   │  RAM   │              │  VRAM  │
+   │ (DDR4) │              │ (GDDR6)│
+   │ 16 GB  │              │  8 GB  │
+   └────────┘              └────────┘
+        │                        │
+        └────────────┬───────────┘
+                     │
+              PCIe Bus (copy required)
+```
+
+Data must be explicitly copied between CPU RAM and GPU VRAM:
+- High latency (microseconds to milliseconds)
+- Limited bandwidth (PCIe 4.0: ~32 GB/s)
+- Double memory usage (same data in both memories)
+
+### Apple Silicon unified memory
+
+```
+┌─────────────────────────────────────────────┐
+│              Apple Silicon SoC              │
+│                                             │
+│  ┌──────────┐    ┌──────────┐    ┌──────┐  │
+│  │   CPU    │    │   GPU    │    │Neural│  │
+│  │          │    │          │    │Engine│  │
+│  │ P-cores  │    │  Metal   │    │      │  │
+│  │ E-cores  │    │  Cores   │    │      │  │
+│  └────┬─────┘    └────┬─────┘    └──┬───┘  │
+│       │               │              │      │
+│       └───────────────┼──────────────┘      │
+│                       │                     │
+│              ┌────────▼────────┐            │
+│              │ Memory Fabric   │            │
+│              │ (800 GB/s)      │            │
+│              └────────┬────────┘            │
+└───────────────────────┼─────────────────────┘
+                        │
+                  ┌─────▼──────┐
+                  │   LPDDR5   │
+                  │   (Unified)│
+                  │  16-128 GB │
+                  └────────────┘
+```
+
+**Key advantages**:
+- **Zero-copy access**: CPU and GPU read/write the same memory addresses
+- **Ultra-high bandwidth**: 400-800 GB/s (vs. 32 GB/s PCIe)
+- **Low latency**: Direct memory access (nanoseconds)
+- **Larger effective memory**: No duplication needed
+
+<Info>
+On an M3 Max with 128GB, the full 128GB is available to both CPU and GPU, unlike a traditional setup where you might have 64GB RAM + 24GB VRAM with data duplication.
+</Info>
+
+## How MLX leverages unified memory
+
+### No explicit device transfers
+
+With MLX, arrays live in unified memory and can be accessed by any device without copying:
+
+```rust
+use mlx_rs::{array, ops, StreamOrDevice};
+
+// Create array - lives in unified memory
+let x = array!([[1.0, 2.0], [3.0, 4.0]]);
+
+// CPU operation - direct access, no copy
+let y = ops::add(&x, &x, StreamOrDevice::cpu())?;
+
+// GPU operation - same array, no copy needed
+let z = ops::matmul(&x, &y, StreamOrDevice::gpu())?;
+
+// Both CPU and GPU can access z without copying
+let cpu_sum = ops::sum(&z, None, StreamOrDevice::cpu())?;
+let gpu_norm = ops::sqrt(&ops::sum(&ops::square(&z)?, None, StreamOrDevice::gpu())?))?;
+```
+
+Contrast with PyTorch (CUDA):
+```python
+import torch
+
+x = torch.tensor([[1.0, 2.0], [3.0, 4.0]])  # CPU memory
+x_gpu = x.cuda()                             # Copy to GPU (explicit)
+y = x_gpu @ x_gpu.T                          # GPU operation
+y_cpu = y.cpu()                              # Copy back to CPU (explicit)
+```
+
+### Device as execution hint
+
+In MLX, the device parameter tells MLX **where to execute** the operation, not where the data lives:
+
+```rust
+use mlx_rs::{random, ops, StreamOrDevice};
+
+let a = random::normal(&[1000, 1000], None, None, None)?;
+
+// Same array, different execution devices
+let b = ops::matmul(&a, &a, StreamOrDevice::cpu())?;  // Execute on CPU
+let c = ops::matmul(&a, &a, StreamOrDevice::gpu())?;  // Execute on GPU
+
+// No data movement between these operations
+```
+
+See mlx-rs/src/lib.rs:202 for the unified memory documentation.
+
+## Benefits for ML inference
+
+### 1. Larger models fit in memory
+
+Without memory duplication, you can load larger models:
+
+**Traditional GPU (48GB RAM + 24GB VRAM)**:
+- Model weights: 12GB (needs to be in VRAM)
+- Activations: ~8GB (in VRAM during inference)
+- Input data: 4GB (in RAM, copied to VRAM)
+- **Total**: 12GB VRAM used, 4GB RAM used
+- **Limit**: Cannot load models > 24GB
+
+**Apple Silicon (64GB unified)**:
+- Model weights: 12GB (accessible by both CPU/GPU)
+- Activations: ~8GB (computed on GPU, accessible to CPU)
+- Input data: 4GB (no copy needed)
+- **Total**: 24GB unified memory used
+- **Available**: 40GB for larger models or batches
+
+<Tip>
+On M3 Max 128GB, you can run quantized 70B parameter models (~35GB in 4-bit) with room for large context windows.
+</Tip>
+
+### 2. Faster mixed CPU/GPU workloads
+
+Some ML pipelines naturally split across CPU and GPU:
+
+**LLM generation with CPU sampling**:
+```rust
+use mlx_rs::{ops, random, StreamOrDevice};
+use qwen3_mlx::Model;
+
+// GPU: Compute logits (expensive)
+let logits = model.forward(&input_ids, &cache, StreamOrDevice::gpu())?;
+
+// CPU: Sample next token (cheap, easier on CPU)
+let next_token = sample_token(&logits, temperature, StreamOrDevice::cpu())?;
+
+// No GPU→CPU copy needed for logits array
+```
+
+**ASR with CPU audio preprocessing**:
+```rust
+use mlx_rs_core::audio::{load_wav, resample};
+use funasr_mlx::transcribe;
+
+// CPU: Load and preprocess audio (I/O bound)
+let (samples, rate) = load_wav("audio.wav")?;
+let samples_16k = resample(&samples, rate, 16000);
+
+// GPU: Run encoder/decoder (compute bound)
+let transcript = transcribe(&model, &samples_16k, StreamOrDevice::gpu())?;
+
+// No CPU→GPU copy for audio samples
+```
+
+### 3. Efficient attention with large contexts
+
+Attention mechanisms require accessing large key-value caches:
+
+```rust
+use mlx_rs_core::{ConcatKeyValueCache, scaled_dot_product_attention};
+
+// KV cache grows with context length (e.g., 10K tokens)
+let mut cache: Vec<Option<ConcatKeyValueCache>> = vec![None; num_layers];
+
+// GPU computes attention
+let (keys, values) = cache[layer].update_and_fetch(new_k, new_v)?;
+let attention_out = scaled_dot_product_attention(
+    queries, keys, values,
+    None, scale, Some(SdpaMask::Causal),
+    StreamOrDevice::gpu()
+)?;
+
+// No memory copy - cache accessible to both CPU (for updates) and GPU (for attention)
+```
+
+With separate memories, the KV cache would need to:
+1. Be stored in VRAM (limited)
+2. Be copied from RAM if it exceeds VRAM
+3. Limit maximum context length
+
+### 4. Reduced latency for small batches
+
+ML inference often uses small batch sizes (1-4). With traditional GPUs, the PCIe copy overhead dominates:
+
+**Traditional GPU (batch_size=1)**:
+- Input copy: 0.5ms
+- GPU computation: 2ms
+- Output copy: 0.3ms
+- **Total**: 2.8ms (28% overhead)
+
+**Apple Silicon (batch_size=1)**:
+- Input copy: 0ms (unified memory)
+- GPU computation: 2ms
+- Output copy: 0ms (unified memory)
+- **Total**: 2ms (0% overhead)
+
+This 40% speedup compounds across many inference calls.
+
+## Memory bandwidth
+
+Unified memory provides massive bandwidth between processors:
+
+| Device | Memory Bandwidth | Notes |
+|--------|-----------------|-------|
+| M1 Max | 400 GB/s | 512-bit LPDDR5 |
+| M2 Max | 400 GB/s | 512-bit LPDDR5 |
+| M3 Max | 400 GB/s | 512-bit LPDDR5 |
+| M3 Ultra | 800 GB/s | Dual M3 Max connected |
+| M4 Max | 546 GB/s | 512-bit LPDDR5X |
+| **vs. PCIe 4.0** | 32 GB/s | CPU ↔ GPU transfer |
+| **vs. NVIDIA H100** | 3,350 GB/s | HBM3 (on-chip only) |
+
+<Note>
+While NVIDIA's HBM3 has higher bandwidth, it's only between GPU and VRAM. CPU-GPU transfers still go through PCIe (32 GB/s).
+</Note>
+
+## Memory coherency
+
+MLX handles memory coherency automatically:
+
+```rust
+use mlx_rs::{array, ops, StreamOrDevice};
+
+let mut x = array!([1.0, 2.0, 3.0]);
+
+// GPU modifies x
+let x = ops::multiply(&x, 2.0, StreamOrDevice::gpu())?;
+x.eval()?;  // GPU writes: [2.0, 4.0, 6.0]
+
+// CPU reads updated value
+let sum = ops::sum(&x, None, StreamOrDevice::cpu())?;
+assert_eq!(sum.item::<f32>(), 12.0);  // Sees GPU's update
+```
+
+**How it works**:
+1. GPU writes data to unified memory
+2. Memory controller ensures CPU caches are invalidated
+3. CPU reads see the updated data (cache miss → fetch from RAM)
+4. No explicit synchronization needed in user code
+
+## Limitations and tradeoffs
+
+### Memory bandwidth vs. GPU-only
+
+While 400-800 GB/s is fast, dedicated GPU memory (HBM) can be faster:
+- NVIDIA H100: 3,350 GB/s (HBM3)
+- AMD MI300X: 5,300 GB/s (HBM3)
+
+However, this only matters for:
+- Very large models where most time is memory-bound
+- Operations that shuffle large amounts of data
+- Training with large batch sizes
+
+For inference with small-medium models, Apple Silicon's unified memory wins due to:
+- Zero PCIe overhead
+- Larger effective memory capacity
+- Lower latency
+
+### Memory contention
+
+CPU and GPU share the same memory bandwidth:
+
+```rust
+// If CPU is heavily using memory while GPU runs inference,
+// both may experience reduced bandwidth
+let cpu_task = std::thread::spawn(|| {
+    // Heavy CPU memory access
+    process_large_dataset();
+});
+
+// GPU inference runs concurrently
+let output = model.forward(&input, StreamOrDevice::gpu())?;
+
+cpu_task.join().unwrap();
+```
+
+Mitigation:
+- Use CPU's efficiency cores for background tasks
+- MLX prioritizes GPU memory access
+- OS scheduler manages contention
+
+### No memory overcommit for GPU
+
+Unlike CPU (which can swap to disk), GPU operations fail if memory is exhausted:
+
+```rust
+use mlx_rs::random;
+
+// This will fail if not enough unified memory available
+let huge_array = random::normal(&[100000, 100000], None, None, None)?;
+```
+
+Monitor memory usage:
+```bash
+# macOS Activity Monitor shows unified memory usage
+# GPU memory is part of "Memory Used"
+```
+
+## Best practices
+
+### 1. Avoid unnecessary evaluations
+
+Lazy evaluation minimizes memory allocations:
+
+```rust
+// Good: Single evaluation
+let result = ops::add(&a, &b, StreamOrDevice::gpu())?;
+let output = ops::mul(&result, &c, StreamOrDevice::gpu())?;
+output.eval()?;  // Materializes output, may skip result
+
+// Bad: Multiple evaluations
+let result = ops::add(&a, &b, StreamOrDevice::gpu())?;
+result.eval()?;  // Allocates result
+let output = ops::mul(&result, &c, StreamOrDevice::gpu())?;
+output.eval()?;  // Allocates output (result still in memory)
+```
+
+### 2. Prefer GPU for large operations
+
+GPU is faster for large arrays, CPU for small ones:
+
+```rust
+// Large matmul: Use GPU
+let large = ops::matmul(&x, &w, StreamOrDevice::gpu())?;  // x: [1024, 4096]
+
+// Small operations: CPU can be faster due to GPU dispatch overhead
+let small = ops::add(&a, &b, StreamOrDevice::cpu())?;     // a: [4]
+```
+
+### 3. Batch operations when possible
+
+Reduce overhead by processing multiple items:
+
+```rust
+// Good: Batch processing
+let batch = Array::from_slice(&all_inputs, &[batch_size, seq_len])?;
+let outputs = model.forward(&batch, StreamOrDevice::gpu())?;
+
+// Bad: One at a time
+for input in inputs {
+    let output = model.forward(&input, StreamOrDevice::gpu())?;
+    // More overhead from kernel launches
+}
+```
+
+### 4. Monitor memory usage
+
+Check unified memory consumption:
+
+```bash
+# Terminal: Monitor memory in real-time
+while true; do
+    vm_stat | grep "Pages free"
+    sleep 1
+done
+
+# Or use Activity Monitor GUI
+# Look at "Memory" tab, "Memory Used"
+```
+
+In code:
+```rust
+// Check array size
+let size_bytes = array.size() * array.dtype().size();
+println!("Array memory: {} MB", size_bytes / 1_000_000);
+```
+
+## Unified memory vs. CUDA Unified Memory
+
+NVIDIA also has a "Unified Memory" feature, but it works differently:
+
+| Feature | Apple Unified Memory | CUDA Unified Memory |
+|---------|---------------------|--------------------|
+| **Hardware** | True shared physical memory | Separate CPU/GPU memory |
+| **Data transfer** | None (same memory) | Automatic copying via PCIe |
+| **Overhead** | Zero | PCIe latency + bandwidth |
+| **Explicit `cudaMemcpy`** | Not needed | Optional (automatic or manual) |
+| **Performance** | Consistent | Depends on access pattern |
+
+CUDA Unified Memory is a software abstraction that automatically copies data, while Apple's is true hardware-level sharing.
+
+## Additional resources
+
+<CardGroup cols={2}>
+  <Card title="MLX framework" href="/concepts/mlx-framework" icon="microchip">
+    How MLX leverages unified memory
+  </Card>
+  <Card title="Lazy evaluation" href="/concepts/lazy-evaluation" icon="clock">
+    Memory optimization through lazy evaluation
+  </Card>
+  <Card title="Architecture" href="/concepts/architecture" icon="diagram-project">
+    System architecture and data flow
+  </Card>
+  <Card title="Performance tips" href="/guides/performance" icon="gauge-high">
+    Optimize inference performance
+  </Card>
+</CardGroup>

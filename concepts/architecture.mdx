@@ -1,0 +1,405 @@
+---
+title: System architecture
+description: Understand OminiX-MLX's modular architecture, crate structure, and data flow patterns
+---
+
+## Overview
+
+OminiX-MLX is a layered Rust ecosystem for ML inference on Apple Silicon. The architecture follows a bottom-up design where lower-level crates provide safe abstractions over MLX, and higher-level crates implement specific model families.
+
+## Architecture diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              User Application                                │
+│                    (OminiX-API / Custom Rust Application)                   │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────────┐
+        │                       │                           │
+        ▼                       ▼                           ▼
+┌───────────────┐         ┌─────────────────┐         ┌─────────────────┐
+│  LLM / VLM    │         │   Audio Crates  │         │  Image Crates   │
+├───────────────┤         ├─────────────────┤         ├─────────────────┤
+│ qwen3-mlx     │         │ funasr-mlx      │         │ flux-klein-mlx  │
+│ glm4-mlx      │         │ funasr-nano-mlx │         │ zimage-mlx      │
+│ glm4-moe-mlx  │         │ qwen3-asr-mlx   │         │ qwen-image-mlx  │
+│ mixtral-mlx   │         │ gpt-sovits-mlx  │         │                 │
+│ mistral-mlx   │         │                 │         │                 │
+│ moxin-vlm-mlx │         │                 │         │                 │
+│ minicpm-sala  │         │                 │         │                 │
+└───────┬───────┘         └────────┬────────┘         └────────┬────────┘
+        │                          │                           │
+        └──────────────────────────┼───────────────────────────┘
+                                   │
+                                   ▼
+                    ┌──────────────────────────┐
+                    │       mlx-rs-core        │
+                    ├──────────────────────────┤
+                    │ • KV Cache Management    │
+                    │ • RoPE Embeddings        │
+                    │ • Attention (SDPA)       │
+                    │ • Audio Processing       │
+                    │ • Metal Kernels          │
+                    │ • Speculative Decoding   │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
+                    │         mlx-rs           │
+                    ├──────────────────────────┤
+                    │ • Safe Rust API          │
+                    │ • Array Operations       │
+                    │ • Neural Network Layers  │
+                    │ • Transforms (eval, jit) │
+                    │ • Random/Ops/Indexing    │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
+                    │         mlx-sys          │
+                    ├──────────────────────────┤
+                    │ • FFI Bindings (bindgen) │
+                    │ • mlx-c Submodule        │
+                    └────────────┬─────────────┘
+                                 │
+                                 ▼
+                    ┌──────────────────────────┐
+                    │      Apple MLX (C++)     │
+                    ├──────────────────────────┤
+                    │ • Metal GPU Backend      │
+                    │ • Accelerate Framework   │
+                    │ • Unified Memory         │
+                    │ • Lazy Evaluation        │
+                    └──────────────────────────┘
+```
+
+## Layer breakdown
+
+### Foundation layer (mlx-sys)
+
+The lowest layer provides raw FFI bindings to Apple's MLX C++ library:
+
+- **Auto-generated bindings**: Uses bindgen to create safe FFI interfaces
+- **mlx-c submodule**: Git submodule tracking the upstream MLX C bindings
+- **Zero-cost abstractions**: Direct mapping to C functions with no runtime overhead
+
+### Core abstraction layer (mlx-rs)
+
+Provides a safe, idiomatic Rust API over mlx-sys:
+
+- **Array operations**: N-dimensional arrays with automatic memory management
+- **Neural network layers**: Linear, convolution, attention, normalization
+- **Function transforms**: Automatic differentiation (`grad`), compilation
+- **Device management**: CPU/GPU device abstraction with unified memory
+- **Random operations**: Random number generation and distributions
+- **Type safety**: Compile-time shape and dtype validation where possible
+
+Key modules in mlx-rs/src/:
+- `array/mod.rs`: Core `Array` type and operations
+- `device.rs`: Device abstraction (CPU/GPU) - mlx-rs/src/device.rs:11
+- `stream.rs`: Execution streams for parallel computation - mlx-rs/src/stream.rs:110
+- `ops/`: Mathematical and neural network operations
+- `transforms/`: Function transformations (grad, compile)
+- `nn/`: High-level neural network layers
+
+### Shared infrastructure layer (mlx-rs-core)
+
+Common components shared across model implementations:
+
+**KV Cache Management**
+- `ConcatKeyValueCache`: Simple concatenating cache for autoregressive generation
+- `KeyValueCache` trait: Interface for custom cache implementations
+- Used by all LLM/VLM crates for efficient token generation
+
+**Attention Utilities**
+- `scaled_dot_product_attention()`: Optimized SDPA with mask support
+- `create_attention_mask()`: Causal and sliding window mask generation
+- `initialize_rope()`: RoPE embeddings with scaling configurations
+
+**Audio Processing**
+- WAV I/O: Load/save 16/24/32-bit PCM audio
+- Resampling: High-quality sinc interpolation
+- Mel spectrograms: STFT-based feature extraction
+- HuBERT preprocessing: Specialized audio normalization
+
+**Metal Kernels**
+- `fused_swiglu()`: Fused SwiGLU activation (45x faster for MoE models)
+- Custom Metal shaders for specialized operations
+
+### Model implementation layer
+
+Model-specific crates implementing complete inference pipelines:
+
+**LLM/VLM Crates** (qwen3-mlx, glm4-mlx, mixtral-mlx, etc.)
+- Model architecture definitions
+- Weight loading from safetensors/HuggingFace
+- Tokenizer integration
+- Generation loops with KV caching
+- Quantization support (4-bit, 8-bit)
+
+**Audio Crates** (funasr-mlx, qwen3-asr-mlx, gpt-sovits-mlx)
+- Audio frontend processing (mel spectrograms, STFT)
+- Encoder/decoder architectures (Paraformer, Whisper-style)
+- Vocabulary management
+- Real-time streaming support
+
+**Image Crates** (flux-klein-mlx, zimage-mlx)
+- VAE encoders/decoders
+- Diffusion transformers (DiT, MMDiT)
+- Text encoder integration
+- Latent space manipulation
+
+### Application layer
+
+User-facing applications and APIs:
+
+- **ominix-api**: Unified HTTP server with OpenAI-compatible endpoints
+- **Custom applications**: User code directly importing model crates
+- **Example binaries**: Reference implementations in each crate's `examples/` directory
+
+## Crate structure
+
+```
+OminiX-MLX/
+├── mlx-rs/              # Core MLX Rust bindings
+├── mlx-rs-core/         # Shared inference infrastructure
+│
+├── qwen3-mlx/           # Qwen2, Qwen3, Qwen3-MoE
+├── glm4-mlx/            # GLM4
+├── glm4-moe-mlx/        # GLM4-MoE (45 experts)
+├── mixtral-mlx/         # Mixtral 8x7B/8x22B
+├── mistral-mlx/         # Mistral 7B
+├── moxin-vlm-mlx/       # Moxin-7B VLM (vision-language)
+├── MiniCPM-SALA-MLX/    # MiniCPM-SALA 9B (hybrid attention, 1M context)
+│
+├── gpt-sovits-mlx/      # GPT-SoVITS voice cloning
+├── funasr-mlx/          # FunASR Paraformer ASR
+├── funasr-nano-mlx/     # FunASR-Nano (SenseVoice + Qwen)
+├── qwen3-asr-mlx/       # Qwen3-ASR (30+ languages, 0.6B/1.7B)
+│
+├── ominix-api/          # Unified OpenAI-compatible API server
+│
+├── flux-klein-mlx/      # FLUX.2-klein image generation
+├── zimage-mlx/          # Z-Image generation
+└── qwen-image-mlx/      # Qwen image generation
+```
+
+## Data flow patterns
+
+### LLM inference pipeline
+
+```
+┌─────────────────┐
+│   Input Text    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Tokenizer     │  Convert text to token IDs
+│  (tokenizers)   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Embedding     │  token_ids → hidden_states [batch, seq_len, hidden_dim]
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Transformer    │  Apply attention + MLP layers
+│   Layers (N)    │  • Self-attention with KV cache
+│                 │  • RoPE position embeddings
+│                 │  • RMSNorm/LayerNorm
+│                 │  • MLP with SwiGLU/GELU
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   LM Head       │  hidden → logits [batch, seq_len, vocab_size]
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Sampling      │  logits → next_token (argmax/temperature)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Detokenizer    │  token_id → text
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Output Text    │
+└─────────────────┘
+```
+
+**Key optimization**: KV cache stores past key/value tensors to avoid recomputing attention for previous tokens. Only the new token's keys/values are computed each step.
+
+### ASR inference pipeline
+
+```
+┌─────────────────┐
+│   Audio File    │  (WAV/MP3)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Audio Frontend │  
+│                 │  • Load and decode audio
+│                 │  • Resample to 16kHz
+│                 │  • Extract mel spectrogram / STFT features
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Encoder       │  Features → encoder hidden states
+│  (Paraformer/   │  • Conformer/Transformer blocks
+│   SAN-M)        │  • Temporal convolution
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│   Decoder       │  Hidden states → token probabilities
+│  (CTC / CIF)    │  • CTC: Frame-level prediction
+│                 │  • CIF: Continuous integrate-and-fire
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Vocabulary     │  Token IDs → characters/words
+│   Mapping       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Transcript     │  Final text output
+└─────────────────┘
+```
+
+### Image generation pipeline
+
+```
+┌─────────────────┐
+│  Text Prompt    │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Text Encoder   │  text → embeddings
+│  (CLIP/T5/Qwen) │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Random Noise   │  latent_shape ~ N(0, 1)
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Diffusion      │  Iterative denoising
+│  Transformer    │  • DiT/MMDiT architecture
+│  (DiT/MMDiT)    │  • Attention with text conditioning
+│                 │  • N denoising steps
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  VAE Decoder    │  latent → pixel space
+│                 │  [batch, latent_dim, h/8, w/8] → [batch, 3, h, w]
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  PNG/JPEG       │  tensor → image file
+│  Encoding       │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  Output Image   │
+└─────────────────┘
+```
+
+## Memory management
+
+OminiX-MLX leverages Rust's ownership system combined with MLX's unified memory:
+
+- **Reference counting**: MLX arrays use internal reference counting; Rust's `Drop` decrements the count
+- **Zero-copy operations**: Arrays can be shared between CPU and GPU without copying
+- **Lazy materialization**: Array data only allocated when `eval()` is called
+- **Automatic cleanup**: When Rust values go out of scope, MLX memory is freed
+
+<Info>
+The `Array` type is thread-safe (`Send`) and uses MLX's internal reference counting, similar to `Arc<T>` but managed by MLX.
+</Info>
+
+## Parallelism and streams
+
+MLX uses streams to enable parallel execution:
+
+- **Default stream**: Operations use `StreamOrDevice::default()` which maps to GPU by default
+- **Explicit streams**: Create separate streams for parallel computation
+- **No data races**: MLX handles synchronization between operations on different streams
+- **Device specification**: Operations can target CPU or GPU via the `stream` parameter
+
+Example parallel execution:
+```rust
+use mlx_rs::{StreamOrDevice, ops};
+
+// Operations on different streams execute in parallel
+let a = ops::add(&x, &y, StreamOrDevice::cpu())?;
+let b = ops::mul(&x, &y, StreamOrDevice::gpu())?;
+```
+
+## Build system
+
+The project uses Cargo workspaces for efficient builds:
+
+- **Workspace root**: Top-level `Cargo.toml` defines all member crates
+- **Shared dependencies**: Common dependencies specified once at workspace level
+- **Incremental compilation**: Changing one model crate only rebuilds that crate
+- **Feature flags**: `metal` and `accelerate` features control MLX backend
+
+```bash
+# Build all crates
+cargo build --release
+
+# Build specific model crate
+cargo build --release -p qwen3-mlx
+
+# Build with specific features
+cargo build --release --features metal,accelerate
+```
+
+## Design principles
+
+**Modularity**: Each model family is a separate crate with minimal dependencies
+
+**Type safety**: Leverage Rust's type system to catch errors at compile time
+
+**Zero-cost abstractions**: Rust wrappers add no runtime overhead over raw MLX
+
+**Ergonomic APIs**: Provide convenient builders, macros, and method chaining
+
+**Pure Rust inference**: No Python runtime required; models run standalone
+
+**Production-ready**: Focus on reliability, error handling, and performance
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="MLX framework" href="/concepts/mlx-framework" icon="microchip">
+    Learn about the MLX framework and Metal acceleration
+  </Card>
+  <Card title="Unified memory" href="/concepts/unified-memory" icon="memory">
+    Understand Apple Silicon's unified memory architecture
+  </Card>
+  <Card title="Lazy evaluation" href="/concepts/lazy-evaluation" icon="clock">
+    Explore lazy evaluation and compute graph optimization
+  </Card>
+  <Card title="Core API" href="/api/core" icon="code">
+    Browse the mlx-rs core API reference
+  </Card>
+</CardGroup>

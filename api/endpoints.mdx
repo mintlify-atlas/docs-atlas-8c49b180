@@ -1,0 +1,539 @@
+---
+title: API endpoints
+description: Complete reference for OminiX-MLX API endpoints with request/response formats
+---
+
+## Audio endpoints
+
+### Create transcription
+
+Transcribe audio to text using Qwen3-ASR models. Compatible with OpenAI Whisper API format.
+
+<CodeGroup>
+```bash Multipart upload
+curl http://localhost:8080/v1/audio/transcriptions \
+  -F file=@audio.wav \
+  -F language=Chinese
+```
+
+```bash JSON file path
+curl http://localhost:8080/v1/audio/transcriptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file_path": "/path/to/audio.wav",
+    "language": "English"
+  }'
+```
+
+```python Python
+import requests
+
+with open("audio.wav", "rb") as f:
+    response = requests.post(
+        "http://localhost:8080/v1/audio/transcriptions",
+        files={"file": f},
+        data={"language": "English"}
+    )
+
+print(response.json()["text"])
+```
+
+```javascript JavaScript
+const formData = new FormData();
+formData.append("file", audioBlob, "audio.wav");
+formData.append("language", "English");
+
+const response = await fetch("http://localhost:8080/v1/audio/transcriptions", {
+  method: "POST",
+  body: formData
+});
+
+const result = await response.json();
+console.log(result.text);
+```
+</CodeGroup>
+
+#### Request parameters
+
+<ParamField path="file" type="file">
+  Audio file to transcribe. Supported formats: WAV, MP3, M4A, FLAC.
+  
+  **Multipart upload only.** Use `file_path` for JSON requests.
+</ParamField>
+
+<ParamField path="file_path" type="string">
+  Path to audio file on server filesystem.
+  
+  **JSON requests only.** Use `file` for multipart uploads.
+</ParamField>
+
+<ParamField path="language" type="string">
+  Language of the audio content. Specifying the language improves accuracy.
+  
+  Supported languages: `Chinese`, `English`, `Spanish`, `French`, `German`, `Japanese`, `Korean`, `Arabic`, `Russian`, `Hindi`, `Thai`, `Vietnamese`, and 15+ more.
+  
+  Example: `"English"`, `"Chinese"`
+</ParamField>
+
+<ParamField path="model" type="string" default="qwen3-asr">
+  Model identifier. Currently only `qwen3-asr` is supported.
+</ParamField>
+
+<ParamField path="response_format" type="string" default="json">
+  Response format. Options: `json`, `text`, `verbose_json`
+  
+  - `json`: Returns transcription text only
+  - `text`: Returns plain text response
+  - `verbose_json`: Includes timestamps and metadata
+</ParamField>
+
+#### Response format
+
+<ResponseField name="text" type="string">
+  Transcribed text from the audio file
+</ResponseField>
+
+<ResponseField name="duration" type="number">
+  Audio duration in seconds (verbose_json only)
+</ResponseField>
+
+<ResponseField name="language" type="string">
+  Detected or specified language (verbose_json only)
+</ResponseField>
+
+#### Example response
+
+```json
+{
+  "text": "Welcome to OminiX-MLX, a high-performance ML inference framework for Apple Silicon."
+}
+```
+
+#### Verbose response
+
+```json
+{
+  "text": "Welcome to OminiX-MLX, a high-performance ML inference framework for Apple Silicon.",
+  "duration": 5.2,
+  "language": "English",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.1,
+      "text": "Welcome to OminiX-MLX,"
+    },
+    {
+      "start": 2.1,
+      "end": 5.2,
+      "text": "a high-performance ML inference framework for Apple Silicon."
+    }
+  ]
+}
+```
+
+---
+
+## Chat endpoints
+
+### Create chat completion
+
+<Note>
+  Available in **MiniCPM-SALA** server. Coming to OminiX-API unified server soon.
+</Note>
+
+Generate chat completions using LLM models with OpenAI-compatible format.
+
+<CodeGroup>
+```bash cURL
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minicpm-sala-9b",
+    "messages": [
+      {"role": "user", "content": "Explain quantum computing"}
+    ],
+    "temperature": 0.7,
+    "max_tokens": 256
+  }'
+```
+
+```python Python
+import requests
+
+response = requests.post(
+    "http://localhost:8080/v1/chat/completions",
+    json={
+        "model": "minicpm-sala-9b",
+        "messages": [{"role": "user", "content": "Explain quantum computing"}],
+        "temperature": 0.7,
+        "max_tokens": 256
+    }
+)
+
+print(response.json()["choices"][0]["message"]["content"])
+```
+
+```javascript JavaScript
+const response = await fetch("http://localhost:8080/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "minicpm-sala-9b",
+    messages: [{role: "user", content: "Explain quantum computing"}],
+    temperature: 0.7,
+    max_tokens: 256
+  })
+});
+
+const result = await response.json();
+console.log(result.choices[0].message.content);
+```
+</CodeGroup>
+
+#### Request parameters
+
+<ParamField path="model" type="string" required>
+  Model identifier to use for completion
+  
+  Example: `"minicpm-sala-9b"`
+</ParamField>
+
+<ParamField path="messages" type="array" required>
+  Array of message objects representing the conversation history
+  
+  Each message contains:
+  - `role`: One of `system`, `user`, or `assistant`
+  - `content`: Message text content
+</ParamField>
+
+<ParamField path="temperature" type="number" default="0.7">
+  Sampling temperature between 0 and 2. Higher values make output more random.
+  
+  - `0.0`: Deterministic (greedy sampling)
+  - `0.7`: Balanced creativity and coherence
+  - `1.5+`: More creative but less focused
+</ParamField>
+
+<ParamField path="max_tokens" type="integer" default="2048">
+  Maximum number of tokens to generate
+</ParamField>
+
+<ParamField path="top_p" type="number" default="1.0">
+  Nucleus sampling threshold. Alternative to temperature.
+</ParamField>
+
+<ParamField path="stream" type="boolean" default="false">
+  Whether to stream response tokens (not yet implemented)
+</ParamField>
+
+#### Response format
+
+<ResponseField name="id" type="string">
+  Unique completion identifier
+</ResponseField>
+
+<ResponseField name="object" type="string">
+  Object type, always `"chat.completion"`
+</ResponseField>
+
+<ResponseField name="model" type="string">
+  Model used for completion
+</ResponseField>
+
+<ResponseField name="choices" type="array">
+  Array of completion choices (currently always length 1)
+  
+  Each choice contains:
+  - `index`: Choice index (always 0)
+  - `message`: Response message with `role` and `content`
+  - `finish_reason`: Why generation stopped (`"stop"`, `"length"`, etc.)
+</ResponseField>
+
+<ResponseField name="usage" type="object">
+  Token usage statistics
+  
+  Contains:
+  - `prompt_tokens`: Input token count
+  - `completion_tokens`: Generated token count
+  - `total_tokens`: Sum of prompt and completion tokens
+</ResponseField>
+
+#### Example response
+
+```json
+{
+  "id": "chatcmpl-18a3f2b4c5d6e7f8",
+  "object": "chat.completion",
+  "model": "minicpm-sala-9b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Quantum computing uses quantum mechanical phenomena like superposition and entanglement to perform computations. Unlike classical bits that are either 0 or 1, quantum bits (qubits) can exist in multiple states simultaneously..."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 12,
+    "completion_tokens": 156,
+    "total_tokens": 168
+  }
+}
+```
+
+---
+
+## Model management endpoints
+
+### List models
+
+Retrieve list of available models with metadata including path, size, quantization, and loaded status.
+
+```bash cURL
+curl http://localhost:8080/v1/models
+```
+
+#### Response format
+
+<ResponseField name="object" type="string">
+  Object type, always `"list"`
+</ResponseField>
+
+<ResponseField name="data" type="array">
+  Array of model objects
+</ResponseField>
+
+#### Model object fields
+
+<ResponseField name="id" type="string">
+  Model identifier (directory name)
+</ResponseField>
+
+<ResponseField name="object" type="string">
+  Object type, always `"model"`
+</ResponseField>
+
+<ResponseField name="owned_by" type="string">
+  Model owner (e.g., `"mlx-community"`, `"local"`)
+</ResponseField>
+
+<ResponseField name="path" type="string">
+  Absolute path to model directory
+</ResponseField>
+
+<ResponseField name="loaded" type="boolean">
+  Whether this model is currently loaded in the server
+</ResponseField>
+
+<ResponseField name="repo_id" type="string">
+  HuggingFace repository ID (if downloaded via API)
+</ResponseField>
+
+<ResponseField name="quantization" type="object">
+  Quantization configuration
+  
+  Contains:
+  - `bits`: Quantization bit width (4, 8, etc.)
+  - `group_size`: Group size for quantization
+</ResponseField>
+
+<ResponseField name="size_bytes" type="integer">
+  Total size of model files in bytes
+</ResponseField>
+
+<ResponseField name="downloaded_at" type="string">
+  Unix timestamp when model was downloaded
+</ResponseField>
+
+#### Example response
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "qwen3-asr-1.7b",
+      "object": "model",
+      "owned_by": "mlx-community",
+      "path": "/Users/you/.ominix/models/qwen3-asr-1.7b",
+      "loaded": true,
+      "repo_id": "mlx-community/Qwen3-ASR-1.7B-8bit",
+      "quantization": {
+        "bits": 8,
+        "group_size": 64
+      },
+      "size_bytes": 2460000000,
+      "downloaded_at": "1672531200"
+    },
+    {
+      "id": "MiniCPM-SALA-9B-8bit",
+      "object": "model",
+      "owned_by": "moxin-org",
+      "path": "/Users/you/.ominix/models/MiniCPM-SALA-9B-8bit",
+      "loaded": false,
+      "repo_id": "moxin-org/MiniCPM4-SALA-9B-8bit-mlx",
+      "quantization": {
+        "bits": 8,
+        "group_size": 64
+      },
+      "size_bytes": 9600000000
+    }
+  ]
+}
+```
+
+---
+
+### Download model
+
+Download a model from HuggingFace Hub to the local models directory.
+
+```bash cURL
+curl -X POST http://localhost:8080/v1/models/download \
+  -H "Content-Type: application/json" \
+  -d '{"repo_id": "mlx-community/Qwen3-ASR-1.7B-8bit"}'
+```
+
+#### Request parameters
+
+<ParamField path="repo_id" type="string" required>
+  HuggingFace repository ID in format `owner/model-name`
+  
+  Example: `"mlx-community/Qwen3-ASR-1.7B-8bit"`
+</ParamField>
+
+#### Response format
+
+<ResponseField name="status" type="string">
+  Download status, always `"downloading"`
+</ResponseField>
+
+<ResponseField name="id" type="string">
+  Model identifier (extracted from repo_id)
+</ResponseField>
+
+<ResponseField name="repo_id" type="string">
+  HuggingFace repository ID
+</ResponseField>
+
+#### Example response
+
+```json
+{
+  "status": "downloading",
+  "id": "Qwen3-ASR-1.7B-8bit",
+  "repo_id": "mlx-community/Qwen3-ASR-1.7B-8bit"
+}
+```
+
+<Note>
+  Download runs asynchronously. Use `GET /v1/models` to check when the model is available.
+</Note>
+
+#### Downloaded files
+
+The server downloads these essential files:
+
+- `config.json` - Model configuration
+- `tokenizer.json` - Tokenizer vocabulary
+- `tokenizer_config.json` - Tokenizer settings
+- `model.safetensors` - Model weights (single file)
+- `model.safetensors.index.json` + shards - Model weights (sharded)
+
+---
+
+### Delete model
+
+Delete a downloaded model from the local filesystem.
+
+```bash cURL
+curl -X DELETE http://localhost:8080/v1/models/Qwen3-ASR-1.7B-8bit
+```
+
+#### Path parameters
+
+<ParamField path="id" type="string" required>
+  Model identifier to delete (from model list)
+</ParamField>
+
+#### Response format
+
+<ResponseField name="id" type="string">
+  Model identifier that was deleted
+</ResponseField>
+
+<ResponseField name="deleted" type="boolean">
+  Always `true` if successful
+</ResponseField>
+
+#### Example response
+
+```json
+{
+  "id": "Qwen3-ASR-1.7B-8bit",
+  "deleted": true
+}
+```
+
+<Warning>
+  You cannot delete the currently loaded model. Stop the server or load a different model first.
+</Warning>
+
+---
+
+## Health endpoint
+
+### Health check
+
+Check server health and readiness.
+
+```bash cURL
+curl http://localhost:8080/health
+```
+
+#### Response format
+
+```json
+{
+  "status": "ok"
+}
+```
+
+Returns `200 OK` when server is healthy and ready to accept requests.
+
+---
+
+## Error responses
+
+All endpoints return OpenAI-compatible error responses:
+
+```json
+{
+  "error": {
+    "message": "Detailed error message",
+    "type": "error_type",
+    "code": "error_code"
+  }
+}
+```
+
+### Error types
+
+| HTTP Status | Error Type | Description |
+|-------------|------------|-------------|
+| 400 | `invalid_request_error` | Malformed request or invalid parameters |
+| 404 | `not_found` | Endpoint or resource not found |
+| 409 | `conflict` | Resource conflict (e.g., model already exists) |
+| 500 | `server_error` | Internal server error or inference failure |
+
+### Common error codes
+
+| Code | Description |
+|------|-------------|
+| `invalid_audio_format` | Unsupported audio file format |
+| `invalid_language` | Unsupported language specified |
+| `model_not_found` | Requested model not available |
+| `inference_failed` | Model inference error |
+| `download_failed` | Model download error |

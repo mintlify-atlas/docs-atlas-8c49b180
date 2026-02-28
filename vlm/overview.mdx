@@ -1,0 +1,138 @@
+---
+title: Vision-language models
+description: Use VLMs to understand and reason about images with natural language on Apple Silicon
+---
+
+OminiX provides high-performance vision-language model (VLM) inference on Apple Silicon through MLX. These models combine visual understanding with language capabilities, enabling applications like image captioning, visual question answering, and multimodal understanding.
+
+## Available models
+
+OminiX currently supports the following vision-language models:
+
+<CardGroup cols={2}>
+  <Card title="Moxin-7B" icon="image" href="/vlm/moxin">
+    Dual-encoder VLM with DINOv2 and SigLIP vision backbones
+  </Card>
+</CardGroup>
+
+## Key features
+
+### Dual vision encoders
+
+OminiX VLMs use multiple specialized vision encoders to capture different aspects of visual information:
+
+- **DINOv2** - Self-supervised ViT trained on ImageNet, excellent for semantic understanding
+- **SigLIP** - Contrastive vision-language encoder trained on image-text pairs
+
+The outputs from these encoders are fused and projected into the language model's embedding space, providing rich multimodal representations.
+
+### Efficient quantization
+
+Reduce memory usage and improve inference speed with 8-bit or 4-bit quantization:
+
+```rust
+use moxin_vlm_mlx::load_model;
+
+let vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+
+// Quantize to 8-bit (group_size=64)
+let vlm = vlm.quantize(64, 8)?;
+```
+
+Quantization is applied only to the language model decoder, keeping vision encoders in BF16 for optimal quality.
+
+### KV-cache generation
+
+All VLMs use efficient KV-caching for fast autoregressive generation:
+
+1. **Prefill** - Process image and prompt in parallel, cache key-value pairs
+2. **Decode** - Generate tokens one at a time using cached values
+
+This approach provides significant speedups, especially for longer sequences.
+
+## Architecture overview
+
+The typical VLM architecture in OminiX follows this pipeline:
+
+```
+Image (224×224)
+  ├─ Vision Encoder 1 → [B, 256, D1]
+  └─ Vision Encoder 2 → [B, 256, D2]
+              │ concat + project
+        [B, 256, 4096]  (visual tokens)
+              │
+  BOS + [visual tokens] + text tokens
+              │ LLM Decoder
+        logits → autoregressive generation
+```
+
+Visual features are converted into "visual tokens" that the language model processes alongside text tokens, enabling seamless multimodal reasoning.
+
+## Performance considerations
+
+### Memory usage
+
+- **BF16 (no quantization)**: ~14GB for Moxin-7B
+- **INT8 quantization**: ~7GB for Moxin-7B
+- **INT4 quantization**: ~4GB for Moxin-7B
+
+### Inference speed
+
+Typical performance on M3 Max (36 GPU cores):
+
+- **Prefill**: 200-300ms (vision encoding + prompt processing)
+- **Decode**: 30-50 tokens/second (BF16), 50-80 tokens/second (INT8)
+
+<Note>
+  Vision encoding only runs once during prefill. Subsequent token generation uses only the language decoder, making decode steps much faster.
+</Note>
+
+## Getting started
+
+<Steps>
+  <Step title="Download a model">
+    Use the Hugging Face CLI to download model weights:
+    
+    ```bash
+    huggingface-cli download moxin-org/moxin-llm-7b \
+        --local-dir ~/.OminiX/models/moxin-vlm-7b
+    ```
+  </Step>
+  
+  <Step title="Load and run inference">
+    Load the model and generate from an image:
+    
+    ```rust
+    use moxin_vlm_mlx::{load_model, load_tokenizer, normalize_dino, normalize_siglip};
+    
+    let mut vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+    let tokenizer = load_tokenizer("~/.OminiX/models/moxin-vlm-7b")?;
+    
+    // Preprocess image
+    let (dino_img, siglip_img) = preprocess_image("photo.jpg")?;
+    
+    // Generate
+    let prompt = "Describe this image.";
+    // ... (see model-specific docs for complete examples)
+    ```
+  </Step>
+  
+  <Step title="Optimize with quantization">
+    For faster inference and lower memory usage:
+    
+    ```rust
+    let vlm = vlm.quantize(64, 8)?;  // 8-bit quantization
+    ```
+  </Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Moxin-7B guide" icon="book" href="/vlm/moxin">
+    Learn how to use the Moxin-7B VLM
+  </Card>
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

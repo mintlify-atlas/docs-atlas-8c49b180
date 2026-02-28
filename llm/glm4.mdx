@@ -1,0 +1,339 @@
+---
+title: GLM-4 models
+description: GLM-4 LLM inference with unique architecture optimizations
+---
+
+GLM-4 is a 9B parameter language model from Tsinghua University with a distinctive architecture featuring partial RoPE, fused MLP projections, and extra layer normalization for improved stability.
+
+## Features
+
+- **Partial RoPE**: Rotary position embedding on half of head dimensions
+- **Fused MLP**: Combined gate_up_proj for better efficiency  
+- **Extra LayerNorms**: Post-attention and post-MLP normalization layers
+- **4-bit quantization**: Required for consumer hardware (6 GB vs 18 GB)
+- **Step-based KV cache**: Memory-efficient generation
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+glm4-mlx = { path = "../glm4-mlx" }
+mlx-rs = "0.18"
+```
+
+## Quick start
+
+<Steps>
+  <Step title="Download model">
+    Download the 4-bit quantized model (recommended):
+
+    ```bash
+    huggingface-cli download mlx-community/glm-4-9b-chat-4bit \
+        --local-dir ./models/GLM-4-9B-4bit
+    ```
+
+    Or the full precision model (requires 18GB+ memory):
+
+    ```bash
+    huggingface-cli download mlx-community/glm-4-9b-chat-bf16 \
+        --local-dir ./models/GLM-4-9B
+    ```
+  </Step>
+
+  <Step title="Run generation example">
+    ```bash
+    cargo run --release --example generate_glm4 -- \
+        ./models/GLM-4-9B-4bit "你好"
+    ```
+  </Step>
+
+  <Step title="Use in your code">
+    ```rust
+    use glm4_mlx::{load_model, load_tokenizer, Generate, KVCache};
+    use mlx_rs::ops::indexing::NewAxis;
+
+    let tokenizer = load_tokenizer("./models/GLM-4-9B-4bit")?;
+    let mut model = load_model("./models/GLM-4-9B-4bit")?;
+
+    let encoding = tokenizer.encode("你好，", true)?;
+    let prompt = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt);
+
+    for token in generator.take(100) {
+        let token = token?;
+        print!("{}", tokenizer.decode(&[token.item::<u32>()], true)?);
+    }
+    ```
+  </Step>
+</Steps>
+
+## Architecture details
+
+GLM-4 uses several unique architectural features:
+
+### Partial RoPE
+
+Unlike standard transformers that apply rotary position embedding to all head dimensions, GLM-4 only applies RoPE to the first half (`partial_rotary_factor = 0.5`).
+
+This reduces computation while maintaining positional awareness:
+
+```rust
+// Standard RoPE: applied to all dims
+let rope_dims = head_dim;  // e.g., 128
+
+// GLM-4 partial RoPE: applied to first half
+let rope_dims = head_dim / 2;  // e.g., 64
+```
+
+### Fused gate_up_proj
+
+The MLP layer uses a single projection to `2×hidden_dim`, then splits for gate and up paths:
+
+```
+x → gate_up_proj(dim → 2×dim) → split → [gate, up]
+                                            ↓      ↓
+                                         silu()    |
+                                            ↓      |
+                                         multiply ←┘
+                                            ↓
+                                    down_proj(2×dim → dim)
+```
+
+This is more efficient than separate projections:
+
+```rust
+// Traditional approach (2 matrix multiplies)
+let gate = gate_proj.forward(&x)?;
+let up = up_proj.forward(&x)?;
+
+// GLM-4 fused approach (1 matrix multiply + split)
+let gate_up = gate_up_proj.forward(&x)?;
+let (gate, up) = gate_up.split(2, -1)?;
+```
+
+### Extra LayerNorms
+
+Each decoder layer has 4 LayerNorm operations:
+
+1. `input_layernorm` - Before attention
+2. `post_self_attn_layernorm` - After attention, before residual
+3. `post_attention_layernorm` - Before MLP  
+4. `post_mlp_layernorm` - After MLP, before residual
+
+This provides better gradient flow and training stability compared to standard transformers with only 2 LayerNorms per block.
+
+## Code example
+
+From [examples/generate_glm4.rs](https://github.com/moxin-org/OminiX-MLX/blob/main/glm4-mlx/examples/generate_glm4.rs):
+
+```rust
+use glm4_mlx::{load_model, load_tokenizer, Generate, KVCache};
+use mlx_rs::ops::indexing::NewAxis;
+use mlx_rs::transforms::eval;
+use std::time::Instant;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let model_dir = "./models/GLM-4-9B-4bit";
+    let prompt = "你好，请介绍一下自己。";
+
+    println!("Loading model from: {}", model_dir);
+    let start = Instant::now();
+
+    let tokenizer = load_tokenizer(model_dir)?;
+    let mut model = load_model(model_dir)?;
+
+    println!("Model loaded in {:.2}s", start.elapsed().as_secs_f32());
+
+    // Tokenize
+    let encoding = tokenizer.encode(prompt, true)?;
+    let prompt_tokens = mlx_rs::Array::from(encoding.get_ids()).index(NewAxis);
+
+    println!("Prompt ({} tokens): {}", encoding.get_ids().len(), prompt);
+    println!("---");
+
+    // Generate
+    let mut cache = Vec::new();
+    let generator = Generate::<KVCache>::new(&mut model, &mut cache, 0.7, &prompt_tokens);
+
+    let mut tokens = Vec::new();
+    for (i, token) in generator.enumerate() {
+        let token = token?;
+        tokens.push(token.clone());
+
+        // Decode in batches
+        if tokens.len() % 10 == 0 {
+            eval(&tokens)?;
+            let slice: Vec<u32> = tokens.drain(..).map(|t| t.item::<u32>()).collect();
+            let text = tokenizer.decode(&slice, true)?;
+            print!("{}", text);
+        }
+
+        if i >= 100 { break; }
+    }
+
+    // Flush remaining
+    if !tokens.is_empty() {
+        eval(&tokens)?;
+        let slice: Vec<u32> = tokens.drain(..).map(|t| t.item::<u32>()).collect();
+        print!("{}", tokenizer.decode(&slice, true)?);
+    }
+    println!();
+
+    Ok(())
+}
+```
+
+## Supported models
+
+<CardGroup cols={2}>
+  <Card title="GLM-4-9B (bf16)" icon="server">
+    **Size**: 18 GB  
+    **Precision**: bfloat16  
+    **Use case**: Maximum quality (requires 32GB+ RAM)  
+    **Download**:
+    ```bash
+    huggingface-cli download mlx-community/glm-4-9b-chat-bf16 \
+        --local-dir ./models/GLM-4-9B
+    ```
+  </Card>
+
+  <Card title="GLM-4-9B (4-bit)" icon="microchip">
+    **Size**: 6 GB  
+    **Precision**: 4-bit quantized  
+    **Use case**: Recommended for consumer hardware  
+    **Download**:
+    ```bash
+    huggingface-cli download mlx-community/glm-4-9b-chat-4bit \
+        --local-dir ./models/GLM-4-9B-4bit
+    ```
+  </Card>
+</CardGroup>
+
+## Converting models
+
+Convert from HuggingFace with 4-bit quantization:
+
+```bash
+pip install mlx-lm
+mlx_lm.convert --hf-path THUDM/glm-4-9b-chat -q
+```
+
+Without quantization:
+
+```bash
+mlx_lm.convert --hf-path THUDM/glm-4-9b-chat
+```
+
+## Model configuration
+
+GLM-4-9B configuration:
+
+```json
+{
+  "hidden_size": 4096,
+  "num_hidden_layers": 40,
+  "num_attention_heads": 32,
+  "num_key_value_heads": 2,
+  "intermediate_size": 13696,
+  "partial_rotary_factor": 0.5,
+  "vocab_size": 151552,
+  "rope_theta": 10000.0,
+  "rms_norm_eps": 1.5625e-07
+}
+```
+
+Key parameters:
+- **Grouped Query Attention**: 32 query heads, 2 KV heads (16:1 ratio)
+- **Partial RoPE**: 0.5 factor means RoPE applied to 64 of 128 head dimensions
+- **Large intermediate size**: 13696 dims (3.34× hidden size)
+
+## Performance considerations
+
+### Memory requirements
+
+| Model | Weights | KV Cache (2K ctx) | Total |
+|-------|---------|-------------------|-------|
+| GLM-4-9B (bf16) | 18 GB | ~1 GB | ~19 GB |
+| GLM-4-9B (4-bit) | 6 GB | ~1 GB | ~7 GB |
+
+The 4-bit model fits comfortably on M1/M2/M3 devices with 16GB+ unified memory.
+
+### Inference speed
+
+On Apple M3 Max (estimated based on architecture):
+
+- **Prompt processing**: ~200 tok/s (4-bit)
+- **Token generation**: ~50 tok/s (4-bit)
+
+Similar to Qwen3-8B given comparable parameter count and architecture complexity.
+
+### Chinese language support
+
+GLM-4 is optimized for Chinese language understanding with:
+- Extended Chinese vocabulary (151K tokens)
+- Training on large Chinese corpora
+- Better tokenization efficiency for Chinese text
+
+Use Chinese prompts for best results:
+
+```rust
+let prompt = "你好，请介绍一下自己。";  // "Hello, please introduce yourself."
+```
+
+## API reference
+
+### Loading functions
+
+```rust
+pub fn load_model(model_dir: impl AsRef<Path>) -> Result<Model, Error>
+pub fn load_tokenizer(model_dir: impl AsRef<Path>) -> Result<Tokenizer, Error>
+```
+
+### Generation
+
+```rust
+pub struct Generate<C: KeyValueCache> {
+    // fields omitted
+}
+
+impl<C: KeyValueCache> Generate<C> {
+    pub fn new(
+        model: &mut Model,
+        cache: &mut Vec<C>,
+        temperature: f32,
+        prompt: &Array,
+    ) -> Self
+}
+```
+
+Iterator yielding generated tokens. Use `temperature = 0.0` for greedy decoding.
+
+## Troubleshooting
+
+### Model loads slowly
+
+GLM-4-9B has 40 layers which takes time to load. Use bf16 → 4-bit quantization to reduce load time:
+
+```bash
+# Quantize existing bf16 model
+mlx_lm.convert --hf-path ./models/GLM-4-9B -q
+```
+
+### Out of memory
+
+GLM-4-9B (bf16) requires 20GB+ memory. Solutions:
+1. Use 4-bit quantized model instead
+2. Close other applications
+3. Reduce generation length
+
+### Unexpected Chinese output
+
+GLM-4 is trained primarily on Chinese text. For English prompts, you may get mixed-language responses. This is expected behavior.
+
+## Related models
+
+- [Qwen3](/llm/qwen3) - Alternative 9B model with similar performance

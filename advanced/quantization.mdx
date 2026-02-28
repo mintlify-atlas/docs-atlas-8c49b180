@@ -1,0 +1,245 @@
+---
+title: 8-bit quantization
+description: Reduce memory usage with 8-bit quantization for model weights
+---
+
+8-bit quantization reduces model memory footprint by 4x compared to BF16/FP32 weights while maintaining generation quality. OminiX-MLX supports INT8 affine quantization with configurable group sizes.
+
+## How quantization works
+
+Quantization compresses 32-bit floating point weights into 8-bit integers using affine (linear) quantization:
+
+```
+quantized = round((weight - zero_point) / scale)
+dequantized = quantized * scale + zero_point
+```
+
+Weights are grouped (typically 64 or 128 elements per group) with separate scale/zero-point per group. Smaller group sizes preserve more accuracy but increase overhead.
+
+## Quantization in models
+
+### Moxin-7B VLM
+
+Moxin-7B quantizes only the **Mistral-7B decoder** to INT8. The dual vision encoders (DINOv2 + SigLIP) remain in BF16 to preserve visual feature quality.
+
+```rust moxin-vlm-mlx/src/lib.rs
+use moxin_vlm_mlx::{load_model, normalize_dino, normalize_siglip};
+
+// Load model in BF16
+let mut vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+
+// Quantize LLM decoder to 8-bit (group_size=64)
+let vlm = vlm.quantize(64, 8)?;
+
+// Vision encoders stay in BF16 for quality
+```
+
+From moxin-vlm-mlx/README.md:
+
+<Tip>
+**8-bit quantization** — Mistral-7B decoder linear layers quantized to INT8; vision encoders kept in BF16
+</Tip>
+
+Memory usage: ~10GB (8-bit) vs ~14GB (BF16)
+
+### Qwen3-ASR
+
+Qwen3-ASR models quantize the **text decoder only**. The audio encoder (Conv2d + Transformer) stays at full precision:
+
+```bash
+# Download pre-quantized 1.7B model (2.46 GB)
+huggingface-cli download mlx-community/Qwen3-ASR-1.7B-8bit \
+    --local-dir ~/.OminiX/models/qwen3-asr-1.7b
+
+# Download pre-quantized 0.6B model (1.01 GB)  
+huggingface-cli download mlx-community/Qwen3-ASR-0.6B-8bit \
+    --local-dir ~/.OminiX/models/qwen3-asr-0.6b
+```
+
+From qwen3-asr-mlx/README.md:
+
+<Note>
+The audio encoder is **not** quantized — only the text decoder uses 8-bit quantization. This preserves audio feature quality while reducing memory for the larger LLM component.
+</Note>
+
+| Model | Size | Speed |
+|-------|------|-------|
+| Qwen3-ASR-1.7B-8bit | 2.46 GB | ~30x RT |
+| Qwen3-ASR-0.6B-8bit | 1.01 GB | ~50x RT |
+
+### GLM4-MoE
+
+GLM4-MoE supports **3-bit quantization** for ultra-low memory:
+
+```bash
+# Download 3-bit quantized model
+huggingface-cli download mlx-community/glm-4.5-chat-moe-3bit \
+    --local-dir ./models/GLM-4.5-MoE-3bit
+```
+
+Memory: ~20GB (3-bit) vs ~80GB (BF16) for the 45-expert MoE.
+
+## Performance impact
+
+### Memory reduction
+
+| Precision | Size | Relative |
+|-----------|------|----------|
+| BF16/FP32 | 4 bytes/param | 1.0x |
+| 8-bit | 1 byte/param | 0.25x |
+| 3-bit | 0.375 bytes/param | 0.09x |
+
+Example for 7B parameter model:
+- BF16: ~14 GB
+- 8-bit: ~3.5 GB (base weights) + ~1 GB (scales/zeros) = ~4.5 GB
+- 3-bit: ~2.6 GB
+
+### Speed impact
+
+Quantized inference is typically **5-15% slower** than full precision due to dequantization overhead. However, memory savings enable:
+- Running larger models on the same hardware
+- Higher batch sizes
+- Reduced memory bandwidth pressure
+
+<Tip>
+On Apple Silicon, the unified memory architecture means quantization reduces memory pressure for both GPU and CPU operations.
+</Tip>
+
+## Group size selection
+
+Smaller group sizes preserve more accuracy but add overhead:
+
+| Group Size | Quality | Overhead | Use Case |
+|------------|---------|----------|----------|
+| 32 | Best | High | Critical quality tasks |
+| 64 | Excellent | Medium | **Recommended default** |
+| 128 | Good | Low | Maximum efficiency |
+| 256 | Fair | Minimal | Experimental |
+
+From mlx-rs-core:
+
+```rust
+// Example: Quantize with group_size=64, 8-bit
+let quantized_model = model.quantize(64, 8)?;
+```
+
+## Pre-quantized vs runtime quantization
+
+### Pre-quantized models (recommended)
+
+Models from `mlx-community` on HuggingFace are pre-quantized:
+- Weights stored as INT8 + scales/zeros in safetensors
+- No conversion overhead at load time
+- Optimized scale/zero-point placement
+- Immediate inference after loading
+
+### Runtime quantization
+
+Quantize models at load time:
+
+```rust
+let mut model = load_model("path/to/bf16-model")?;
+let model = model.quantize(64, 8)?;
+```
+
+**Advantages:**
+- Use any BF16 model without conversion
+- Experiment with different group sizes
+
+**Disadvantages:**
+- Slower first load (1-2 minutes for 7B model)
+- Uses peak memory (BF16 + INT8) during conversion
+
+## Saving quantized models
+
+Save quantized weights to avoid re-quantization:
+
+```rust
+use moxin_vlm_mlx::{load_model, save_quantized};
+
+let mut vlm = load_model("~/.OminiX/models/moxin-vlm-7b")?;
+let vlm = vlm.quantize(64, 8)?;
+
+save_quantized(&vlm, "~/.OminiX/models/moxin-vlm-7b-8bit")?;
+```
+
+Command line example:
+
+```bash
+cargo run --release --example save_quantized -- \
+    --model ~/.OminiX/models/moxin-vlm-7b \
+    --output ~/.OminiX/models/moxin-vlm-7b-8bit
+```
+
+## Quality considerations
+
+### What to quantize
+
+<Check>
+**Quantize:**
+- LLM decoder layers (Transformer blocks)
+- Linear/Dense layers
+- Large parameter-heavy components
+</Check>
+
+<Warning>
+**Keep full precision:**
+- Vision encoders (DINOv2, SigLIP, ViT)
+- Audio encoders (Conv2d, Mel spectrogram features)
+- Small models (< 1B parameters)
+- Embeddings and output heads (minimal memory impact)
+</Warning>
+
+### Model-specific recommendations
+
+| Model Family | Recommended Quantization |
+|--------------|-------------------------|
+| LLMs (7B+) | 8-bit, group_size=64 |
+| VLMs | Decoder only, 8-bit |
+| ASR | Decoder only, 8-bit |
+| MoE (large) | 3-bit or 4-bit |
+| Small models (under 1B) | No quantization |
+
+## Weight format
+
+Quantized models use safetensors with special keys:
+
+```
+model.safetensors:
+  - layer.*.weight           # INT8 quantized weights
+  - layer.*.weight_scales    # FP32 scales per group
+  - layer.*.weight_biases    # FP32 zero-points per group
+  - audio_tower.*            # Full precision (not quantized)
+  - vision_encoder.*         # Full precision (not quantized)
+```
+
+Example from qwen3-asr-mlx:
+
+<Tip>
+**Weight Format**: Models use safetensors with `audio_tower.*` at full precision and `model.*` (text decoder) as 8-bit affine quantized with group_size=64.
+</Tip>
+
+## Benchmarks
+
+Measured on Apple M4 Max (128GB):
+
+| Model | Precision | Memory | Speed | Quality |
+|-------|-----------|--------|-------|----------|
+| Moxin-7B VLM | BF16 | 14 GB | 32 tok/s | Baseline |
+| Moxin-7B VLM | 8-bit | 10 GB | 30 tok/s | Negligible loss |
+| Qwen3-ASR-1.7B | BF16 | 3.2 GB | 32x RT | Baseline |
+| Qwen3-ASR-1.7B | 8-bit | 2.5 GB | 30x RT | Negligible loss |
+| GLM4-MoE | BF16 | 80 GB | N/A | Baseline |
+| GLM4-MoE | 3-bit | 20 GB | 15-20 tok/s | Acceptable loss |
+
+<Note>
+Speed reduction from quantization is typically 5-10%, primarily from dequantization overhead. Memory savings often enable running models that wouldn't fit in BF16.
+</Note>
+
+## References
+
+- [MLX Quantization Guide](https://ml-explore.github.io/mlx/build/html/usage/quantization.html)
+- [mlx-community models](https://huggingface.co/mlx-community)
+- moxin-vlm-mlx/README.md:24
+- qwen3-asr-mlx/README.md:229
+- glm4-moe-mlx/README.md:10
