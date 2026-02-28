@@ -1,0 +1,178 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "OminiX-MLX",
+  "projectDescription": "High-performance ML inference on Apple Silicon: LLMs, ASR, TTS, and Image Generation in pure Rust",
+  "theme": "aspen",
+  "primaryColor": "#3B82F6",
+  "lightColor": "#60A5FA",
+  "darkColor": "#2563EB",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/mlx-framework",
+              "concepts/unified-memory",
+              "concepts/lazy-evaluation"
+            ]
+          },
+          {
+            "group": "Language Models",
+            "pages": [
+              "llm/overview",
+              "llm/qwen3",
+              "llm/glm4",
+              "llm/mixtral",
+              "llm/mistral",
+              "llm/minicpm-sala"
+            ]
+          },
+          {
+            "group": "Vision-Language Models",
+            "pages": [
+              "vlm/overview",
+              "vlm/moxin"
+            ]
+          },
+          {
+            "group": "Speech Recognition",
+            "pages": [
+              "asr/overview",
+              "asr/qwen3-asr",
+              "asr/paraformer",
+              "asr/funasr-nano"
+            ]
+          },
+          {
+            "group": "Text-to-Speech",
+            "pages": [
+              "tts/overview",
+              "tts/gpt-sovits"
+            ]
+          },
+          {
+            "group": "Image Generation",
+            "pages": [
+              "image/overview",
+              "image/flux-klein",
+              "image/zimage",
+              "image/qwen-image"
+            ]
+          },
+          {
+            "group": "API Server",
+            "pages": [
+              "api/overview",
+              "api/ominix-api",
+              "api/endpoints"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "advanced/quantization",
+              "advanced/kv-cache",
+              "advanced/speculative-decoding",
+              "advanced/performance-tuning"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Libraries",
+            "pages": [
+              "api-reference/mlx-rs",
+              "api-reference/mlx-rs-core"
+            ]
+          },
+          {
+            "group": "Language Models",
+            "pages": [
+              "api-reference/qwen3-mlx",
+              "api-reference/glm4-mlx",
+              "api-reference/mixtral-mlx",
+              "api-reference/mistral-mlx",
+              "api-reference/minicpm-sala-mlx"
+            ]
+          },
+          {
+            "group": "Vision-Language",
+            "pages": [
+              "api-reference/moxin-vlm-mlx"
+            ]
+          },
+          {
+            "group": "Audio",
+            "pages": [
+              "api-reference/qwen3-asr-mlx",
+              "api-reference/funasr-mlx",
+              "api-reference/gpt-sovits-mlx"
+            ]
+          },
+          {
+            "group": "Image",
+            "pages": [
+              "api-reference/flux-klein-mlx",
+              "api-reference/zimage-mlx",
+              "api-reference/qwen-image-mlx"
+            ]
+          },
+          {
+            "group": "Server",
+            "pages": [
+              "api-reference/ominix-api"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "MLX Rust bindings for Apple Silicon GPU acceleration",
+    "Shared inference infrastructure (KV cache, RoPE, attention)",
+    "Multiple LLM families (Qwen, GLM, Mixtral, Mistral, MiniCPM)",
+    "Vision-language models with dual encoders",
+    "Multi-language speech recognition (30+ languages)",
+    "Few-shot voice cloning and TTS",
+    "Fast image generation with FLUX and Z-Image",
+    "OpenAI-compatible API server",
+    "8-bit quantization support",
+    "Zero Python runtime for inference"
+  ],
+  "publicApiSurface": [
+    "mlx_rs::Array",
+    "mlx_rs::ops",
+    "mlx_rs::transforms",
+    "mlx_rs_core::KVCache",
+    "mlx_rs_core::Generate",
+    "mlx_rs_core::Sampler",
+    "qwen3_mlx::load_model",
+    "qwen3_mlx::Generate",
+    "glm4_mlx::load_model",
+    "moxin_vlm_mlx::load_model",
+    "moxin_vlm_mlx::normalize_dino",
+    "moxin_vlm_mlx::normalize_siglip",
+    "qwen3_asr_mlx::Qwen3ASR",
+    "qwen3_asr_mlx::transcribe",
+    "funasr_mlx::load_model",
+    "funasr_mlx::transcribe",
+    "gpt_sovits_mlx::VoiceCloner",
+    "flux_klein_mlx::generate",
+    "zimage_mlx::generate"
+  ]
+}
