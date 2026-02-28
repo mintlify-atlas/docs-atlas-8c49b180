@@ -27,9 +27,10 @@ The server uses Cargo feature flags to include model support:
 | Feature | Description | Default |
 |---------|-------------|---------|
 | `asr` | Enable speech recognition endpoints | ✓ |
-| `llm` | Enable LLM chat endpoints | Coming soon |
-| `vlm` | Enable vision-language endpoints | Coming soon |
-| `tts` | Enable text-to-speech endpoints | Coming soon |
+
+<Note>
+Additional features (LLM, VLM, TTS) are coming soon and will be available in future releases.
+</Note>
 
 Build with specific features:
 
@@ -262,7 +263,7 @@ The server handles concurrent requests efficiently:
     Complete endpoint reference with examples
   </Card>
   
-  <Card title="Speech recognition" icon="microphone" href="/models/speech-recognition">
+  <Card title="Speech recognition" icon="microphone" href="/asr/overview">
     Learn more about ASR models and capabilities
   </Card>
 </CardGroup>

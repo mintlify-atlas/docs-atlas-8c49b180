@@ -11,12 +11,16 @@ OminiX-MLX provides multiple text-to-speech (TTS) engines optimized for Apple Si
   <Card title="GPT-SoVITS" icon="waveform-lines" href="/tts/gpt-sovits">
     Few-shot voice cloning with 4x real-time synthesis
   </Card>
+  {/* Uncomment when Step-Audio 2 support is added
   <Card title="Step-Audio 2" icon="microphone-lines" href="/tts/step-audio2">
     Multimodal audio understanding and generation (planned)
   </Card>
+  */}
+  {/* Uncomment when Qwen3-TTS support is added
   <Card title="Qwen3-TTS" icon="volume" href="/tts/qwen3-tts">
     High-quality TTS from Alibaba (planned)
   </Card>
+  */}
 </CardGroup>
 
 ## Key capabilities
@@ -57,8 +61,6 @@ All TTS engines leverage Metal GPU acceleration via MLX for maximum performance 
 | Engine | Real-time Factor | Quality | Voice Cloning |
 |--------|-----------------|---------|---------------|
 | GPT-SoVITS | 4x | High | Yes |
-| Step-Audio 2 | TBD | Very High | Yes (planned) |
-| Qwen3-TTS | TBD | High | Planned |
 
 <Note>
 **Real-time factor** measures how fast audio is generated. 4x means a 2-second audio clip is generated in 0.5 seconds.
@@ -112,8 +114,6 @@ All TTS engines use common audio processing components from `mlx-rs-core`:
   <Accordion title="Model storage">
     Models are stored in `~/.dora/models/primespeech/` by default:
     - GPT-SoVITS: ~2GB
-    - Step-Audio 2: ~16GB (planned)
-    - Qwen3-TTS: Size TBD (planned)
   </Accordion>
 </AccordionGroup>
 
